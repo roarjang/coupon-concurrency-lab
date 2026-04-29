@@ -33,7 +33,7 @@ public class User {
     private String password;
 
     @Column(nullable = false, length = 30)
-    private String userName;
+    private String username;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
@@ -45,11 +45,11 @@ public class User {
     @Column(nullable = false)
     private LocalDateTime updatedAt;
 
-    public static User create(String email, String encodedPassword, String userName) {
+    public static User create(String email, String encodedPassword, String username) {
         User user = new User();
         user.email = email;
         user.password = encodedPassword;
-        user.userName = userName;
+        user.username = username;
         user.role = UserRole.USER;
 
         return user;

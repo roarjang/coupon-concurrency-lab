@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: flash-coupon-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: flash_coupon
+      POSTGRES_USER: coupon_user
+      POSTGRES_PASSWORD: coupon_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
