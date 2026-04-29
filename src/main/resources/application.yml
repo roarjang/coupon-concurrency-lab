@@ -16,3 +16,7 @@ spring:
   sql:
     init:
       mode: never
+
+jwt:
+  secret: this-is-a-very-long-secret-key-for-jwt-signature-32bytes
+  expiration: 36000000
