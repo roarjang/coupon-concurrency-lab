@@ -1,9 +1,8 @@
 package com.roar.coupon.auth.jwt;
 
 import com.roar.coupon.domain.user.entity.UserRole;
-import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.*;
 import io.jsonwebtoken.security.Keys;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -16,6 +15,7 @@ public class JwtProvider {
 
     private final SecretKey secretKey;
     private final long expirationMillis;
+    private final JwtParser jwtParser;
 
     public JwtProvider(
             @Value("${jwt.secret}") String secret,
@@ -23,6 +23,9 @@ public class JwtProvider {
     ) {
         this.secretKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.expirationMillis = expiration;
+        this.jwtParser = Jwts.parser()
+                .verifyWith(secretKey)
+                .build();
     }
 
     public String generateToken(Long userId, String email, UserRole role) {
@@ -37,5 +40,21 @@ public class JwtProvider {
                 .expiration(expiryDate)
                 .signWith(secretKey)
                 .compact();
+    }
+
+    public Claims parseClaims(String token) {
+        return jwtParser.parseSignedClaims(token).getPayload();
+    }
+
+    public Long getUserId(Claims claims) {
+        return Long.parseLong(claims.getSubject());
+    }
+
+    public String getEmail(Claims claims) {
+        return claims.get("email", String.class);
+    }
+
+    public String getRole(Claims claims) {
+        return claims.get("role", String.class);
     }
 }
