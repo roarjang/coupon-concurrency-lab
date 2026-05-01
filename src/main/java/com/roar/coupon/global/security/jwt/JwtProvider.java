@@ -1,4 +1,4 @@
-package com.roar.coupon.auth.jwt;
+package com.roar.coupon.global.security.jwt;
 
 import com.roar.coupon.domain.user.entity.UserRole;
 import io.jsonwebtoken.*;

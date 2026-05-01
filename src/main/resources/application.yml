@@ -8,6 +8,7 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
+    open-in-view: false
     properties:
       hibernate:
         format_sql: true
@@ -19,4 +20,4 @@ spring:
 
 jwt:
   secret: this-is-a-very-long-secret-key-for-jwt-signature-32bytes
-  expiration: 36000000
+  expiration: 3600000

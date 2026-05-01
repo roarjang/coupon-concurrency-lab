@@ -2,7 +2,7 @@ package com.roar.coupon.auth.service;
 
 import com.roar.coupon.auth.dto.LoginRequest;
 import com.roar.coupon.auth.dto.LoginResponse;
-import com.roar.coupon.auth.jwt.JwtProvider;
+import com.roar.coupon.global.security.jwt.JwtProvider;
 import com.roar.coupon.domain.user.entity.User;
 import com.roar.coupon.domain.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
