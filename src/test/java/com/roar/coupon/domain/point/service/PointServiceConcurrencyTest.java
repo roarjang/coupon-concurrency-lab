@@ -27,6 +27,9 @@ class PointServiceConcurrencyTest {
     private TestPointService testPointService;
 
     @Autowired
+    private PointService pointService;
+
+    @Autowired
     private PointRepository pointRepository;
 
     @Autowired
@@ -39,7 +42,7 @@ class PointServiceConcurrencyTest {
     }
 
     @Test
-    @DisplayName("@Transactional만 적용한 포인트 차감은 동시 요청에서 잔액 정합성을 보장하지 모한다")
+    @DisplayName("@Transactional만 적용한 포인트 차감은 동시 요청에서 잔액 정합성을 보장하지 못한다")
     void concurrentDeduct_transactionOnly_inconsistentBalance() throws InterruptedException {
 
         // given
@@ -104,6 +107,72 @@ class PointServiceConcurrencyTest {
 
         assertThat(successCount.get() + failCount.get()).isEqualTo(threadCount);
         assertThat(result.getBalance()).isGreaterThanOrEqualTo(0L);
+    }
+
+    @Test
+    @DisplayName("비관적 락을 적용한 포인트 차감은 동시 요청에서도 잔액 정합성을 보장한다")
+    void concurrentDeduct_pessimisticLock_consistentBalance() throws InterruptedException {
+
+        // given
+        User user = User.create(
+                "pessimistic-lock@test.com",
+                "encoded-password",
+                "pessimistic-lock-user"
+        );
+
+        User savedUser = userRepository.save(user);
+
+        Point point = new Point(savedUser.getId());
+        pointRepository.save(point);
+
+        testPointService.charge(savedUser.getId(), 10000);
+
+        int threadCount = 15;
+        long deductAmount = 1000L;
+
+        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+
+        CountDownLatch readyLatch = new CountDownLatch(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicInteger failCount = new AtomicInteger();
+
+        // when
+        for (int i = 0; i < threadCount; i++) {
+            executorService.submit(() -> {
+                try {
+                    readyLatch.countDown();
+                    startLatch.await();
+
+                    pointService.deductWithPessimisticLock(savedUser.getId(), deductAmount);
+                    successCount.incrementAndGet();
+                } catch (Exception e) {
+                    failCount.incrementAndGet();
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        readyLatch.await();
+        startLatch.countDown();
+        doneLatch.await();
+
+        executorService.shutdown();
+
+        // then
+        Point result = pointRepository.findByUserId(savedUser.getId())
+                .orElseThrow();
+
+        System.out.println("successCount = " + successCount.get());
+        System.out.println("failCount = " + failCount.get());
+        System.out.println("actualBalance = " + result.getBalance());
+
+        assertThat(successCount.get()).isEqualTo(10);
+        assertThat(failCount.get()).isEqualTo(5);
+        assertThat(result.getBalance()).isEqualTo(0L);
     }
 
     @TestConfiguration
