@@ -114,6 +114,11 @@ Expected Result:
 
 Concurrent deductions are serialized for the same Point row.
 
+Implemented Method:
+
+- `PointService.deductWithPessimisticLock()`
+- `PointRepository.findByUserIdForUpdate()`
+
 Trade-off:
 
 - Strong consistency
@@ -123,7 +128,18 @@ Trade-off:
 
 Status:
 
-Planned as the next implementation step.
+Done.
+
+Observed Result:
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
+
+Interpretation:
+
+The lock serializes concurrent deductions for the same Point row.
+The first 10 requests succeed, and the remaining 5 fail after seeing balance 0.
 
 ## Strategy 2. Optimistic Lock
 

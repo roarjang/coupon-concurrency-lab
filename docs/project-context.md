@@ -46,16 +46,15 @@ This is not a typical CRUD project. The main purpose is to demonstrate how data 
 - Point deduct API
 - Point balance query API
 - Point concurrency test for concurrent deduction
+- Pessimistic lock point deduction experiment
 
-The current Point implementation is a transaction-only read-modify-write baseline.
+The current Point implementation keeps both strategies for comparison:
 
-- `@Transactional` is applied at the service-level business operation.
-- The balance is read from the database, changed in the entity, and persisted by JPA dirty checking.
-- No explicit concurrency control has been applied yet.
+- Transaction-only read-modify-write baseline
+- Pessimistic lock deduction using `PESSIMISTIC_WRITE`
 
 Not applied yet:
 
-- Pessimistic lock
 - Optimistic lock
 - Atomic update query
 - Redis
@@ -100,13 +99,31 @@ This result demonstrates a lost update problem.
 All 15 requests were counted as successful, but the final persisted balance does not reflect 15 successful deductions.
 Several transactions read the same balance before other transactions committed, then overwrote each other's updates.
 
+## Pessimistic Lock Result
+
+The pessimistic lock version uses `PointService.deductWithPessimisticLock()`.
+It reads the Point row with a database write lock before deducting points.
+
+Same scenario:
+
+- Initial balance: 10,000
+- Concurrent requests: 15
+- Deduct amount per request: 1,000
+
+Observed result:
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
+
+This result shows that row-level locking serializes concurrent deductions for the same Point row and prevents lost update.
+
 ## Planned Domains and Strategies
 
 - Product
 - Coupon
 - IssuedCoupon
 - Order
-- Pessimistic lock
 - Optimistic lock
 - Atomic update
 - Redis

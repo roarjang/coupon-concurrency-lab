@@ -92,7 +92,7 @@ Lost update can still occur under concurrent point deduction.
 
 ## Phase 4. Pessimistic Lock
 
-Status: Planned
+Status: Done
 
 Goal: 
 
@@ -102,7 +102,18 @@ Expected behavior:
 
 Only one transaction can modify the Point row at a time.
 
-This is the next implementation step.
+Implemented approach:
+
+- Add a locked repository query using `PESSIMISTIC_WRITE`
+- Keep the existing transaction-only `deduct()` baseline unchanged
+- Add `PointService.deductWithPessimisticLock()` as a separate comparison method
+- Verify the result with a dedicated concurrency test
+
+Observed result:
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
 
 ## Phase 5. Optimistic Lock
 
