@@ -17,24 +17,34 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 인증, 상품 조회, 포인트 충전 등의 기능은 실험을 위한 최소 보조 기능이며,
 프로젝트의 핵심은 동시성 제어와 정합성 검증입니다.
 
-## 3. MVP 기능 범위
+## 3. 현재 구현 상태와 MVP 기능 범위
 
-### 3.1 실험 핵심 기능
-1. 선착순 쿠폰 발급
-2. 쿠폰 중복 발급 방지
-3. 쿠폰 적용 결제
-4. 포인트 차감 정합성 보장
-5. 동시성 테스트
+### 3.1 현재 구현된 기능
 
-### 3.2 실험 보조 기능
 1. 회원가입 / 로그인
 2. JWT 기반 인증
-3. 포인트 충전 / 조회
-4. 상품 조회
-5. 테스트용 쿠폰 데이터 세팅
-6. 내 쿠폰 조회
+3. 회원가입 시 포인트 지갑 생성
+4. 포인트 충전
+5. 포인트 차감
+6. 포인트 잔액 조회
+7. 포인트 차감 동시성 테스트
+
+현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline입니다.
+서비스 계층에서 트랜잭션은 적용되어 있지만, 비관적 락, 낙관적 락, Redis, atomic update query, `synchronized`는 아직 적용하지 않았습니다.
+
+### 3.2 계획된 기능
+
+1. 상품 조회
+2. 선착순 쿠폰 발급
+3. 쿠폰 중복 발급 방지
+4. 쿠폰 적용 결제
+5. 내 쿠폰 조회
+6. 테스트용 쿠폰 데이터 세팅
+7. 포인트 차감 정합성 보장 전략 비교
 
 ## 4. 동시성 실험 설계
+
+쿠폰, 상품, 주문 기반 결제 도메인은 아직 구현되지 않았으며, 아래 쿠폰/결제 실험은 계획된 실험 설계입니다.
 
 ### 4.1. 쿠폰 초과 발급
 
@@ -60,7 +70,7 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 - 해결 전략: 결제 트랜잭션 안에서 발급 쿠폰 row를 잠그거나, status = ISSUED 조건부 업데이트로 한 요청만 USED로 변경한다.
 - 검증 기준: 하나의 발급 쿠폰은 하나의 주문에만 사용되어야 한다.
 
-### 4.4. 포인트 음수 잔액
+### 4.4. 포인트 차감 lost update
 
 - 조건: 사용자의 포인트 잔액보다 큰 금액이 동시에 여러 요청에서 차감
 - 재현하려는 문제: 여러 결제 요청이 같은 포인트 잔액을 동시에 읽고 차감하면서 잔액이 음수가 되거나 정합성이 깨질 수 있다.
@@ -68,13 +78,35 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 - 해결 전략: 먼저 포인트 row에 비관적 락을 적용해 차감 로직을 직렬화하고, 이후 낙관적 락을 비교 실험한다.
 - 검증 기준: 포인트 잔액은 0 미만이 될 수 없고, 성공한 결제만 포인트 차감에 반영되어야 한다.
 
+#### 현재 관측 결과: transaction-only read-modify-write baseline
+
+- 초기 잔액: 10,000
+- 동시 요청 수: 15
+- 요청당 차감 금액: 1,000
+
+정합성이 보장된다면 다음 결과가 나와야 합니다.
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
+
+현재 `@Transactional` 기반 read-modify-write 구현에서는 다음 결과가 관측되었습니다.
+
+- successCount = 15
+- failCount = 0
+- finalBalance = 8000
+- expectedBalanceBySuccessCount = -5000
+
+15개 요청이 모두 성공했다면 논리적으로 잔액은 -5,000이어야 하지만, 실제 DB 잔액은 8,000입니다.
+이는 여러 트랜잭션이 같은 잔액을 읽은 뒤 서로의 변경을 덮어쓴 lost update 문제를 보여줍니다.
+
 ## 5. 정합성 보장 전략
 
 이 프로젝트에서는 단순히 `@Transactional`을 적용하는 것만으로 동시성 문제가 해결된다고 보지 않습니다.
 
-각 실험에서 naive 구현으로 문제를 먼저 재현한 뒤, Redis 원자 연산, DB Unique 제약조건, DB 트랜잭션, 락 전략을 적용하여 결과를 비교합니다.
+각 실험에서 단순 구현으로 문제를 먼저 재현한 뒤, DB Unique 제약조건, DB 트랜잭션, 락 전략, Redis 원자 연산을 적용하여 결과를 비교합니다.
 
-- Redis: 대량의 선착순 요청을 빠르게 제한하는 앞단 제어 역할
+- Redis: 대량의 선착순 요청을 빠르게 제한하는 앞단 제어 역할 (계획)
 - DB Transaction: 결제와 쿠폰 사용, 포인트 차감을 하나의 작업 단위로 보장
 - DB Unique Constraint: 중복 발급과 같은 정합성 조건을 DB 레벨에서 보장
 - Pessimistic Lock: 충돌 가능성이 높은 포인트 차감/쿠폰 사용 상황에서 동시 수정을 직렬화
@@ -84,12 +116,15 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 
 | 실험 | 주요 문제 | 적용 전략 |
 | --- | --- | --- |
-| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | Redis atomic counter |
-| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | UNIQUE(user_id, coupon_id) |
-| 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update |
-| 포인트 음수 잔액 | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock 비교 |
+| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | Redis atomic counter (계획) |
+| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | UNIQUE(user_id, coupon_id) (계획) |
+| 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
+| 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock 비교 (다음 단계) |
 
 ## 6. Entity 설계
+
+### 6.1 구현됨
+
 ### User
 - id
 - email (UNIQUE)
@@ -103,9 +138,13 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 - id
 - userId (UNIQUE)
 - balance
-- version (나중에 낙관적 락 실험할 때 사용)
 - createdAt
 - updatedAt
+
+현재 Point에는 `@Version` 필드가 없습니다.
+잔액이 0 이상이어야 한다는 조건은 현재 DB check constraint가 아니라 `Point.deduct()`의 애플리케이션 레벨 검증으로 처리합니다.
+
+### 6.2 계획됨
 
 ### Product
 - id
@@ -152,20 +191,20 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 
 - User.email: UNIQUE
 - Point.userId: UNIQUE
-- IssuedCoupon(userId, couponId): UNIQUE
-- Point.balance: 0 이상
-- Coupon.totalQuantity: 0 이상
-- Coupon.issuedQuantity: 0 이상
-- IssuedCoupon.status: ISSUED, USED, EXPIRED
-- Order.status: CREATED, PAID, FAILED, CANCELED
-- Order.finalPrice: 0 이상
+- IssuedCoupon(userId, couponId): UNIQUE (계획)
+- Point.balance: 0 이상이어야 함 (현재 애플리케이션 레벨 검증, DB check constraint 아님)
+- Coupon.totalQuantity: 0 이상 (계획)
+- Coupon.issuedQuantity: 0 이상 (계획)
+- IssuedCoupon.status: ISSUED, USED, EXPIRED (계획)
+- Order.status: CREATED, PAID, FAILED, CANCELED (계획)
+- Order.finalPrice: 0 이상 (계획)
 
 ## 7. 검증 방법
 
-동시성 문제는 단순 API 호출만으로 확인하기 어렵기 때문에, 각 실험은 naive 구현과 개선 구현을 분리하여 테스트합니다.
+동시성 문제는 단순 API 호출만으로 확인하기 어렵기 때문에, 각 실험은 transaction-only read-modify-write baseline과 개선 구현을 분리하여 테스트합니다.
 
 - JUnit과 ExecutorService를 사용해 동시에 여러 요청을 발생시킨다.
-- naive 구현에서 먼저 race condition을 재현한다.
+- transaction-only baseline에서 먼저 race condition을 재현한다.
 - Redis, DB 제약 조건, 트랜잭션, 락을 적용한 구현에서 동일 조건으로 다시 검증한다.
 - 테스트 종료 후 DB 상태를 조회해 최종 정합성을 확인한다.
 
