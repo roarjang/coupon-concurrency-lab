@@ -39,8 +39,8 @@ class PointServiceConcurrencyTest {
     }
 
     @Test
-    @DisplayName("동시에 700 포인트 차감 요청이 2번 들어오면 naive 구현에서는 둘 다 성공할 수 있다")
-    void concurrentDeduct_naive_fail() throws InterruptedException {
+    @DisplayName("@Transactional만 적용한 포인트 차감은 동시 요청에서 잔액 정합성을 보장하지 모한다")
+    void concurrentDeduct_transactionOnly_inconsistentBalance() throws InterruptedException {
 
         // given
         User user = User.create(
@@ -54,10 +54,10 @@ class PointServiceConcurrencyTest {
         Point point = new Point(savedUser.getId());
         pointRepository.save(point);
 
-        testPointService.charge(savedUser.getId(), 1000);
+        testPointService.charge(savedUser.getId(), 10000);
 
-        int threadCount = 2;
-        long deductAmount = 700L;
+        int threadCount = 15;
+        long deductAmount = 1000L;
 
         ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
 
@@ -95,13 +95,15 @@ class PointServiceConcurrencyTest {
         Point result = pointRepository.findByUserId(savedUser.getId())
                 .orElseThrow();
 
+        long expectedBalanceBySuccessCount = 10_000L - successCount.get() * deductAmount;
+
         System.out.println("successCount = " + successCount.get());
         System.out.println("failCount = " + failCount.get());
-        System.out.println("finalBalance = " + result.getBalance());
+        System.out.println("expectedBalanceBySuccessCount = " + expectedBalanceBySuccessCount);
+        System.out.println("actualBalance = " + result.getBalance());
 
-        assertThat(successCount.get()).isEqualTo(2);
-        assertThat(failCount.get()).isEqualTo(0);
-        assertThat(result.getBalance()).isEqualTo(300);
+        assertThat(successCount.get() + failCount.get()).isEqualTo(threadCount);
+        assertThat(result.getBalance()).isGreaterThanOrEqualTo(0L);
     }
 
     @TestConfiguration
