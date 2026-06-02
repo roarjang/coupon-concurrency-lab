@@ -34,6 +34,9 @@ public class Point {
     @Column(nullable = false)
     private LocalDateTime updatedAt;
 
+    @Version
+    private Long version;
+
     public Point(Long userId) {
         this.userId = userId;
         this.balance = 0L;

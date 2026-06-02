@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.concurrent.CountDownLatch;
@@ -100,6 +101,7 @@ class PointServiceConcurrencyTest {
 
         long expectedBalanceBySuccessCount = 10_000L - successCount.get() * deductAmount;
 
+        System.out.println("[concurrentDeduct_transactionOnly_inconsistentBalance]");
         System.out.println("successCount = " + successCount.get());
         System.out.println("failCount = " + failCount.get());
         System.out.println("expectedBalanceBySuccessCount = " + expectedBalanceBySuccessCount);
@@ -166,6 +168,7 @@ class PointServiceConcurrencyTest {
         Point result = pointRepository.findByUserId(savedUser.getId())
                 .orElseThrow();
 
+        System.out.println("[concurrentDeduct_pessimisticLock_consistentBalance]");
         System.out.println("successCount = " + successCount.get());
         System.out.println("failCount = " + failCount.get());
         System.out.println("actualBalance = " + result.getBalance());
@@ -173,6 +176,85 @@ class PointServiceConcurrencyTest {
         assertThat(successCount.get()).isEqualTo(10);
         assertThat(failCount.get()).isEqualTo(5);
         assertThat(result.getBalance()).isEqualTo(0L);
+    }
+
+    @Test
+    @DisplayName("낙관적 락을 적용한 포인트 차감은 동시 수정 충돌을 감지한다")
+    void concurrentDeduct_optimisticLock_detectsConflict() throws InterruptedException {
+
+        // given
+        User user = User.create(
+                "optimistic-lock@test.com",
+                "encoded-password",
+                "optimistic-lock-user"
+        );
+
+        User savedUser = userRepository.save(user);
+
+        Point point = new Point(savedUser.getId());
+        pointRepository.save(point);
+
+        testPointService.charge(savedUser.getId(), 10000);
+
+        int threadCount = 15;
+        long deductAmount = 1000L;
+
+        ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
+
+        CountDownLatch readyLatch = new CountDownLatch(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicInteger failCount = new AtomicInteger();
+        AtomicInteger optimisticLockFailCount = new AtomicInteger();
+
+        // when
+        for (int i = 0; i < threadCount; i++) {
+            executorService.submit(() -> {
+                try {
+                    readyLatch.countDown();
+                    startLatch.await();
+
+                    pointService.deductWithOptimisticLock(savedUser.getId(), deductAmount);
+                    successCount.incrementAndGet();
+                } catch (ObjectOptimisticLockingFailureException e) {
+                    optimisticLockFailCount.incrementAndGet();
+                    failCount.incrementAndGet();
+                    System.out.println("optimisticLockException = " + e.getClass().getName());
+                } catch (Exception e) {
+                    failCount.incrementAndGet();
+                    System.out.println("unexpectedException = " + e.getClass().getName());
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        readyLatch.await();
+        startLatch.countDown();
+        doneLatch.await();
+
+        executorService.shutdown();
+
+        // then
+        Point result = pointRepository.findByUserId(savedUser.getId())
+                .orElseThrow();
+
+        long expectedBalanceBySuccessCount = 10_000L - successCount.get() * deductAmount;
+
+        System.out.println("[concurrentDeduct_optimisticLock_detectsConflict]");
+        System.out.println("successCount = " + successCount.get());
+        System.out.println("failCount = " + failCount.get());
+        System.out.println("expectedBalanceBySuccessCount = " + expectedBalanceBySuccessCount);
+        System.out.println("actualBalance = " + result.getBalance());
+
+        assertThat(successCount.get()).isLessThan(threadCount);
+        assertThat(failCount.get()).isGreaterThan(0);
+        assertThat(optimisticLockFailCount.get()).isGreaterThan(0);
+        assertThat(failCount.get()).isEqualTo(optimisticLockFailCount.get());
+        assertThat(result.getBalance()).isEqualTo(expectedBalanceBySuccessCount);
+        assertThat(result.getBalance()).isGreaterThanOrEqualTo(0L);
     }
 
     @TestConfiguration

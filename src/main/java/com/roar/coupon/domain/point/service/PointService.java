@@ -54,4 +54,15 @@ public class PointService {
 
         return PointBalanceResponse.from(point);
     }
+
+    // 5. deductWithOptimisticLock - 포인트 차감 (낙관적 락 적용)
+    @Transactional
+    public PointBalanceResponse deductWithOptimisticLock(Long userId, long amount) {
+        Point point = pointRepository.findByUserId(userId)
+                .orElseThrow(() -> new IllegalArgumentException("포인트 정보를 찾을 수 없습니다."));
+
+        point.deduct(amount);
+
+        return PointBalanceResponse.from(point);
+    }
 }
