@@ -29,9 +29,10 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 6. 포인트 잔액 조회
 7. 포인트 차감 동시성 테스트
 8. 포인트 차감 비관적 락 실험
+9. 포인트 차감 낙관적 락 실험
 
-현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline과 비관적 락 적용 버전을 함께 둡니다.
-낙관적 락, Redis, atomic update query, `synchronized`는 아직 적용하지 않았습니다.
+현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전을 비교합니다.
+Redis, atomic update query, `synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
 
@@ -79,7 +80,7 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 - 해결 전략: 먼저 포인트 row에 비관적 락을 적용해 차감 로직을 직렬화하고, 이후 낙관적 락을 비교 실험한다.
 - 검증 기준: 포인트 잔액은 0 미만이 될 수 없고, 성공한 결제만 포인트 차감에 반영되어야 한다.
 
-#### 현재 관측 결과: transaction-only read-modify-write baseline
+#### 관측 결과: transaction-only read-modify-write baseline
 
 - 초기 잔액: 10,000
 - 동시 요청 수: 15
@@ -101,6 +102,9 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 15개 요청이 모두 성공했다면 논리적으로 잔액은 -5,000이어야 하지만, 실제 DB 잔액은 8,000입니다.
 이는 여러 트랜잭션이 같은 잔액을 읽은 뒤 서로의 변경을 덮어쓴 lost update 문제를 보여줍니다.
 
+주의: 낙관적 락 실험을 위해 `Point` 엔티티에 `@Version`을 추가하면 같은 엔티티를 사용하는 transaction-only 경로도 version check의 영향을 받습니다.
+따라서 위 transaction-only lost update 결과는 `@Version` 적용 전 baseline 관측값으로 보존합니다.
+
 #### 비관적 락 적용 결과
 
 `PointService.deductWithPessimisticLock()`는 포인트 row를 `PESSIMISTIC_WRITE`로 조회한 뒤 차감합니다.
@@ -111,6 +115,21 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 
 비관적 락을 적용하면 같은 사용자의 Point row에 대한 차감 요청이 직렬화됩니다.
 따라서 10개 요청만 성공하고, 잔액이 0이 된 이후의 5개 요청은 잔액 부족으로 실패합니다.
+
+#### 낙관적 락 적용 결과
+
+`Point` 엔티티에 `@Version`을 추가하고, `PointService.deductWithOptimisticLock()`에서 일반 조회 후 차감합니다.
+JPA는 update 시점에 version mismatch를 감지해 `ObjectOptimisticLockingFailureException` 계열 예외를 발생시킵니다.
+
+관측 예시:
+
+- successCount = 3
+- failCount = 12
+- finalBalance = 7000
+- expectedBalanceBySuccessCount = 7000
+
+낙관적 락은 retry 없이 충돌을 감지하는 것까지 검증합니다.
+성공 요청 수는 스레드 스케줄링에 따라 달라질 수 있으므로, 테스트는 실패 수와 최종 잔액이 성공 수와 일치하는지를 검증합니다.
 
 ## 5. 정합성 보장 전략
 
@@ -131,7 +150,7 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 | 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | Redis atomic counter (계획) |
 | 쿠폰 중복 발급 | 동일 사용자 중복 발급 | UNIQUE(user_id, coupon_id) (계획) |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
-| 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock 적용 완료, optimistic lock 비교 예정 |
+| 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock 적용 완료 |
 
 ## 6. Entity 설계
 
@@ -150,10 +169,11 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 - id
 - userId (UNIQUE)
 - balance
+- version (`@Version`)
 - createdAt
 - updatedAt
 
-현재 Point에는 `@Version` 필드가 없습니다.
+현재 Point에는 낙관적 락 충돌 감지를 위한 `@Version` 필드가 있습니다.
 잔액이 0 이상이어야 한다는 조건은 현재 DB check constraint가 아니라 `Point.deduct()`의 애플리케이션 레벨 검증으로 처리합니다.
 
 ### 6.2 계획됨
@@ -244,8 +264,8 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 1. 쿠폰 발급 전략 비교
    - Redis atomic counter 방식과 DB lock 방식의 결과와 성능을 비교한다.
 
-2. 낙관적 락 실험 추가
-   - 포인트 차감과 쿠폰 발급 수량 갱신에 version 기반 낙관적 락을 적용하고, 비관적 락과 비교한다.
+2. 낙관적 락 재시도 전략 추가
+   - 현재는 충돌 감지만 검증하며, 이후 retry를 적용했을 때 최종 성공/실패 결과가 어떻게 달라지는지 비교한다.
 
 3. Redis와 DB 불일치 보정
    - Redis에서는 발급 가능으로 처리되었지만 DB 저장이 실패하는 경우를 가정하고, 보상 처리 또는 재시도 전략을 설계한다.

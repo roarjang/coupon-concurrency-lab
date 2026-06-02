@@ -90,6 +90,11 @@ Conclusion:
 `@Transactional` groups operations inside a single request, but it does not automatically serialize concurrent requests.
 Lost update can still occur under concurrent point deduction.
 
+Note:
+
+This baseline result was observed before adding `@Version` to the Point entity.
+After `@Version` is added, the transaction-only path is also affected by optimistic lock version checking.
+
 ## Phase 4. Pessimistic Lock
 
 Status: Done
@@ -117,7 +122,7 @@ Observed result:
 
 ## Phase 5. Optimistic Lock
 
-Status: Planned
+Status: Done
 
 Goal:
 
@@ -127,9 +132,24 @@ Expected behavior:
 
 Concurrent updates are detected through version mismatch. Some requests fail and retry handling.
 
-Note:
+Implemented approach:
 
-Point does not have an `@Version` field yet. It should be added only when this phase is implemented.
+- Add `@Version` to the Point entity
+- Add `PointService.deductWithOptimisticLock()` as a separate comparison method
+- Keep retry handling out of this phase
+- Verify that optimistic lock conflicts are detected in a dedicated concurrency test
+
+Observed example:
+
+- successCount = 3
+- failCount = 12
+- finalBalance = 7000
+- expectedBalanceBySuccessCount = 7000
+
+Conclusion:
+
+Optimistic lock prevents silent lost update by detecting version conflicts.
+The exact success count may vary under concurrent execution, so the test verifies conflict failures and consistency between successful deduction count and final balance.
 
 ## Phase 6. Atomic Update
 

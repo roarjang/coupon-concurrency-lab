@@ -66,6 +66,9 @@ Examples:
 
 ### Observed Result
 
+This result was observed before adding `@Version` to the Point entity.
+After optimistic locking is added, the same Point entity is also subject to version checking.
+
 Scenario:
 
 - Initial balance: 10,000
@@ -147,11 +150,13 @@ Description:
 
 Use a version column with JPA @Version.
 
-Point does not have an `@Version` field yet.
+Point has an `@Version` field.
+JPA uses the version value during update to detect concurrent modifications.
 
 Expected Result:
 
 Concurrent updates are detected by version mismatch.
+Without retry, some requests fail with optimistic lock exceptions.
 
 Trade-off:
 
@@ -161,7 +166,33 @@ Trade-off:
 
 Status:
 
-Planned.
+Done.
+
+Implemented Method:
+
+- `PointService.deductWithOptimisticLock()`
+- `Point.@Version`
+
+Observed Example:
+
+- successCount = 3
+- failCount = 12
+- finalBalance = 7000
+- expectedBalanceBySuccessCount = 7000
+
+Observed Exception:
+
+- `ObjectOptimisticLockingFailureException`
+
+Interpretation:
+
+The exact success count can vary depending on thread scheduling.
+The important check is that optimistic lock conflicts are detected and the final balance matches the number of successful deductions.
+
+Retry:
+
+Not implemented in this phase.
+This test verifies conflict detection only.
 
 ## Strategy 3. Atomic Update
 

@@ -47,15 +47,16 @@ This is not a typical CRUD project. The main purpose is to demonstrate how data 
 - Point balance query API
 - Point concurrency test for concurrent deduction
 - Pessimistic lock point deduction experiment
+- Optimistic lock point deduction experiment
 
-The current Point implementation keeps both strategies for comparison:
+The current Point implementation keeps multiple strategies for comparison:
 
 - Transaction-only read-modify-write baseline
 - Pessimistic lock deduction using `PESSIMISTIC_WRITE`
+- Optimistic lock deduction using `@Version`
 
 Not applied yet:
 
-- Optimistic lock
 - Atomic update query
 - Redis
 - Distributed lock
@@ -73,7 +74,7 @@ The Point domain will be used as the foundation for:
 - Concurrency experiments
 - Data consistency validation
 
-## Current Point Concurrency Result
+## Transaction-Only Baseline Result
 
 Scenario:
 
@@ -99,6 +100,11 @@ This result demonstrates a lost update problem.
 All 15 requests were counted as successful, but the final persisted balance does not reflect 15 successful deductions.
 Several transactions read the same balance before other transactions committed, then overwrote each other's updates.
 
+Note:
+
+After adding `@Version` to the Point entity for optimistic locking, the transaction-only path is also affected by JPA version checking.
+Therefore, this lost update result is preserved as the baseline result observed before `@Version` was added.
+
 ## Pessimistic Lock Result
 
 The pessimistic lock version uses `PointService.deductWithPessimisticLock()`.
@@ -118,13 +124,33 @@ Observed result:
 
 This result shows that row-level locking serializes concurrent deductions for the same Point row and prevents lost update.
 
+## Optimistic Lock Result
+
+The optimistic lock version uses `PointService.deductWithOptimisticLock()`.
+The Point entity has an `@Version` field, so JPA detects version conflicts during update.
+
+Same scenario:
+
+- Initial balance: 10,000
+- Concurrent requests: 15
+- Deduct amount per request: 1,000
+
+Observed example:
+
+- successCount = 3
+- failCount = 12
+- finalBalance = 7000
+- expectedBalanceBySuccessCount = 7000
+
+The exact success count can vary depending on thread scheduling.
+The important result is that failed requests are optimistic lock conflicts and the final balance matches the number of successful deductions.
+
 ## Planned Domains and Strategies
 
 - Product
 - Coupon
 - IssuedCoupon
 - Order
-- Optimistic lock
 - Atomic update
 - Redis
 
