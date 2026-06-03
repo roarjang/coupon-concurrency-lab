@@ -153,7 +153,7 @@ The exact success count may vary under concurrent execution, so the test verifie
 
 ## Phase 6. Atomic Update
 
-Status: Planned
+Status: Done
 
 Goal:
 
@@ -171,6 +171,21 @@ AND balance >= :amount
 Expected behavior:
 
 The database handles the condition and update as a single atomic operation.
+
+Implemented approach:
+
+- Add a conditional update query to PointRepository
+- Deduct only when `balance >= amount`
+- Increase `version` together with balance update
+- Add `PointService.deductWithAtomicUpdate()` as a separate comparison method
+- Verify consistency with a dedicated concurrency test
+
+Observed result:
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
+- expectedBalanceBySuccessCount = 0
 
 ## Phase 7. Redis
 

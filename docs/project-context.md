@@ -48,16 +48,17 @@ This is not a typical CRUD project. The main purpose is to demonstrate how data 
 - Point concurrency test for concurrent deduction
 - Pessimistic lock point deduction experiment
 - Optimistic lock point deduction experiment
+- Atomic update point deduction experiment
 
 The current Point implementation keeps multiple strategies for comparison:
 
 - Transaction-only read-modify-write baseline
 - Pessimistic lock deduction using `PESSIMISTIC_WRITE`
 - Optimistic lock deduction using `@Version`
+- Atomic update deduction using a conditional update query
 
 Not applied yet:
 
-- Atomic update query
 - Redis
 - Distributed lock
 - `synchronized`
@@ -145,13 +146,32 @@ Observed example:
 The exact success count can vary depending on thread scheduling.
 The important result is that failed requests are optimistic lock conflicts and the final balance matches the number of successful deductions.
 
+## Atomic Update Result
+
+The atomic update version uses `PointService.deductWithAtomicUpdate()`.
+It performs the balance check and deduction in a single conditional update query.
+
+Same scenario:
+
+- Initial balance: 10,000
+- Concurrent requests: 15
+- Deduct amount per request: 1,000
+
+Observed result:
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
+- expectedBalanceBySuccessCount = 0
+
+This result shows that the database can enforce the balance condition and update atomically without loading the Point entity first.
+
 ## Planned Domains and Strategies
 
 - Product
 - Coupon
 - IssuedCoupon
 - Order
-- Atomic update
 - Redis
 
 ## Design Philosophy

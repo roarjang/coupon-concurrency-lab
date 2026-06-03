@@ -30,9 +30,10 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 7. 포인트 차감 동시성 테스트
 8. 포인트 차감 비관적 락 실험
 9. 포인트 차감 낙관적 락 실험
+10. 포인트 차감 조건부 UPDATE 실험
 
-현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전을 비교합니다.
-Redis, atomic update query, `synchronized`는 아직 적용하지 않았습니다.
+현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전, 조건부 UPDATE 적용 버전을 비교합니다.
+Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
 
@@ -131,6 +132,26 @@ JPA는 update 시점에 version mismatch를 감지해 `ObjectOptimisticLockingFa
 낙관적 락은 retry 없이 충돌을 감지하는 것까지 검증합니다.
 성공 요청 수는 스레드 스케줄링에 따라 달라질 수 있으므로, 테스트는 실패 수와 최종 잔액이 성공 수와 일치하는지를 검증합니다.
 
+#### 조건부 UPDATE 적용 결과
+
+`PointService.deductWithAtomicUpdate()`는 포인트를 조회한 뒤 수정하지 않고, DB에서 조건 확인과 차감을 하나의 UPDATE 쿼리로 처리합니다.
+
+```sql
+UPDATE points
+SET balance = balance - :amount,
+    version = version + 1
+WHERE user_id = :userId
+AND balance >= :amount
+```
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
+- expectedBalanceBySuccessCount = 0
+
+조건부 UPDATE는 `balance >= amount` 조건을 만족하는 경우에만 row를 갱신합니다.
+따라서 10개 요청만 성공하고, 잔액이 부족해진 이후의 5개 요청은 update row count가 0이 되어 실패합니다.
+
 ## 5. 정합성 보장 전략
 
 이 프로젝트에서는 단순히 `@Transactional`을 적용하는 것만으로 동시성 문제가 해결된다고 보지 않습니다.
@@ -150,7 +171,7 @@ JPA는 update 시점에 version mismatch를 감지해 `ObjectOptimisticLockingFa
 | 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | Redis atomic counter (계획) |
 | 쿠폰 중복 발급 | 동일 사용자 중복 발급 | UNIQUE(user_id, coupon_id) (계획) |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
-| 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock 적용 완료 |
+| 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock, atomic update 적용 완료 |
 
 ## 6. Entity 설계
 

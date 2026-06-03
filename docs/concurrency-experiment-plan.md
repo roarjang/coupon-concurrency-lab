@@ -204,7 +204,8 @@ Example:
 
 ```SQL
 UPDATE points
-SET balance = balance - :amount
+SET balance = balance - :amount,
+    version = version + 1
 WHERE user_id = :userId
 AND balance >= :amount
 ```
@@ -222,7 +223,28 @@ Trade-off:
 
 Status:
 
-Planned.
+Done.
+
+Implemented Method:
+
+- `PointService.deductWithAtomicUpdate()`
+- `PointRepository.deductIfEnoughBalance()`
+
+Observed Result:
+
+- successCount = 10
+- failCount = 5
+- finalBalance = 0
+- expectedBalanceBySuccessCount = 0
+
+Observed Failure:
+
+- `IllegalArgumentException` for insufficient balance when update count is 0
+
+Interpretation:
+
+The balance check and deduction happen in one database update statement.
+Only 10 requests update the row successfully, and the remaining 5 fail after the balance condition is no longer satisfied.
 
 ## Strategy 4. Redis
 
