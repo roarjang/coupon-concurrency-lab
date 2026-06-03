@@ -65,4 +65,23 @@ public class PointService {
 
         return PointBalanceResponse.from(point);
     }
+
+    // 6. deductWithAtomicUpdate - 포인트 차감 (조건부 쿼리 적용)
+    @Transactional
+    public PointBalanceResponse deductWithAtomicUpdate(Long userId, long amount) {
+        if (amount <= 0) {
+            throw new IllegalArgumentException("포인트 금액은 0보다 커야 합니다.");
+        }
+
+        int updatedRows = pointRepository.deductIfEnoughBalance(userId, amount);
+
+        if (updatedRows == 0) {
+            throw new IllegalArgumentException("포인트 잔액이 금액보다 커야 합니다.");
+        }
+
+        Point point = pointRepository.findByUserId(userId)
+                .orElseThrow(() -> new IllegalArgumentException("포인트 정보를 찾을 수 없습니다."));
+
+        return PointBalanceResponse.from(point);
+    }
 }
