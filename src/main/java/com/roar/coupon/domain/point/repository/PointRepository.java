@@ -1,4 +1,4 @@
-package com.roar.coupon.domain.point.repoistory;
+package com.roar.coupon.domain.point.repository;
 
 import com.roar.coupon.domain.point.entity.Point;
 import jakarta.persistence.LockModeType;

@@ -1,7 +1,7 @@
 package com.roar.coupon.domain.point.service;
 
 import com.roar.coupon.domain.point.entity.Point;
-import com.roar.coupon.domain.point.repoistory.PointRepository;
+import com.roar.coupon.domain.point.repository.PointRepository;
 import com.roar.coupon.domain.user.entity.User;
 import com.roar.coupon.domain.user.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;

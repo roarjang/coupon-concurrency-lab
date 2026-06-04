@@ -2,7 +2,7 @@ package com.roar.coupon.domain.point.service;
 
 import com.roar.coupon.domain.point.dto.PointBalanceResponse;
 import com.roar.coupon.domain.point.entity.Point;
-import com.roar.coupon.domain.point.repoistory.PointRepository;
+import com.roar.coupon.domain.point.repository.PointRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
