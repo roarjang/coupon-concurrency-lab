@@ -63,17 +63,45 @@ Not applied yet:
 - Distributed lock
 - `synchronized`
 
+### Coupon Domain
+
+- Coupon entity
+- IssuedCoupon entity
+- Coupon repository
+- IssuedCoupon repository
+- Transaction-only coupon issuance baseline
+- Overselling concurrency reproduction
+- Duplicate issuance concurrency reproduction
+- DB unique constraint on `(userId, couponId)`
+- Duplicate issuance prevention test using the DB unique constraint
+
+The current Coupon implementation keeps the experiment scope focused on coupon issuance, not payment integration.
+
+Completed coupon experiments:
+
+- Transaction-only baseline for overselling reproduction
+- Transaction-only baseline for duplicate issuance reproduction
+- DB unique constraint experiment for duplicate issuance prevention
+
+Planned coupon experiments:
+
+- Pessimistic lock for stock control
+- Optimistic lock for stock control
+- Atomic update for stock control
+- Redis counter for traffic gating
+- Redis Lua script for stock and duplicate checks
+
 ## Current Focus
 
-The current focus is the Point domain.
+The current focus is the Coupon issuance domain.
 
-The Point domain will be used as the foundation for:
+The Point domain has completed the baseline, pessimistic lock, optimistic lock, and atomic update comparison.
+The Coupon domain now follows the same learning pattern:
 
-- Point charging
-- Point deduction
-- Payment logic
-- Concurrency experiments
-- Data consistency validation
+- Reproduce failures with a transaction-only baseline.
+- Add one consistency mechanism at a time.
+- Verify final database state under concurrent requests.
+- Preserve observed results for portfolio explanation.
 
 ## Transaction-Only Baseline Result
 
@@ -166,13 +194,90 @@ Observed result:
 
 This result shows that the database can enforce the balance condition and update atomically without loading the Point entity first.
 
+## Coupon Transaction-Only Overselling Result
+
+Scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+
+Expected correct result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 1000
+- failCount = 0
+- issuedCouponCountByCoupon = 1000
+- finalIssuedQuantity = 100
+
+This result demonstrates overselling and inventory-record mismatch.
+All 1,000 requests created issued coupon records even though the coupon stock was 100.
+The final `issuedQuantity` stayed at 100, so the Coupon row and IssuedCoupon records diverged.
+
+## Coupon Transaction-Only Duplicate Issuance Result
+
+Scenario:
+
+- Coupon stock: 1,000
+- Concurrent requests: 100
+- User: same user requesting the same coupon
+
+Expected correct result:
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+Observed baseline result before applying the DB unique constraint:
+
+- successCount = 10
+- failCount = 90
+- issuedCouponCountByUserAndCoupon = 10
+
+This result demonstrates that application-level duplicate checks are not enough under concurrency.
+Multiple transactions can pass the duplicate check before another transaction's insert is visible.
+
+## Coupon DB Unique Constraint Result
+
+The DB unique constraint version enforces uniqueness for `(userId, couponId)`.
+
+Same scenario:
+
+- Coupon stock: 1,000
+- Concurrent requests: 100
+- User: same user requesting the same coupon
+
+Expected correct result:
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+Observed result:
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+This result shows that the database constraint acts as the final consistency guard.
+Even if multiple transactions pass the application-level duplicate check, only one insert can commit for the same user and coupon.
+
 ## Planned Domains and Strategies
 
 - Product
-- Coupon
-- IssuedCoupon
 - Order
-- Redis
+- Coupon stock-control strategies:
+  - Pessimistic lock
+  - Optimistic lock
+  - Atomic update
+  - Redis counter
+  - Redis Lua script
 
 ## Design Philosophy
 

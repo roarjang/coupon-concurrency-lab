@@ -6,7 +6,7 @@ This document defines the concurrency experiment roadmap for first-come coupon i
 
 The goal is to reproduce and solve overselling and duplicate issuance problems under concurrent requests. The structure follows the Point domain experiment style: start with a simple transaction-only baseline, observe the failure, then compare multiple consistency strategies.
 
-This document started as a design proposal. The transaction-only coupon baseline has now been implemented, and the observed baseline failures are recorded below. Later consistency strategies remain planned experiments.
+This document started as a design proposal. The transaction-only coupon baseline and DB unique constraint duplicate-prevention experiment have now been implemented, and the observed results are recorded below. Later stock-control strategies remain planned experiments.
 
 ## 2. Target Scenario
 
@@ -61,12 +61,13 @@ For the common stock test:
 
 | Strategy | Goal | Expected conclusion |
 | --- | --- | --- |
-| Transaction-only Baseline | Reproduce overselling or lost update | `@Transactional` alone is not enough under high contention |
-| Pessimistic Lock | Serialize coupon row updates | Strong consistency with lock wait cost |
-| Optimistic Lock | Detect concurrent version conflicts | Prevents silent lost update, but may fail many requests without retry |
-| Atomic Update | Use conditional database update | Efficient for stock decrement or issued count increment |
-| Redis Counter | Use Redis as a fast front-line stock gate | Efficient traffic control, but DB reconciliation must be considered |
-| Redis Lua Script | Atomically check stock and duplicate state in Redis | Stronger Redis-side atomicity, more operational complexity |
+| Transaction-only Baseline | Reproduce overselling and duplicate issuance | Completed: `@Transactional` alone is not enough under high contention |
+| DB Unique Constraint | Prevent duplicate issuance for the same user and coupon | Completed: database uniqueness is the final duplicate guard |
+| Pessimistic Lock | Serialize coupon row updates | Planned: strong consistency with lock wait cost |
+| Optimistic Lock | Detect concurrent version conflicts | Planned: prevents silent lost update, but may fail many requests without retry |
+| Atomic Update | Use conditional database update | Planned: efficient for stock decrement or issued count increment |
+| Redis Counter | Use Redis as a fast front-line stock gate | Planned: efficient traffic control, but DB reconciliation must be considered |
+| Redis Lua Script | Atomically check stock and duplicate state in Redis | Planned: stronger Redis-side atomicity, more operational complexity |
 
 ## 5. Strategy 1: Transaction-only Baseline
 
@@ -157,7 +158,53 @@ Observed conclusion:
 - Final database assertions are required because request counters alone can hide inventory-record divergence.
 - A database unique constraint on `(userId, couponId)` is required as the final guard for duplicate issuance.
 
-## 6. Strategy 2: Pessimistic Lock
+The duplicate-issuance reproduction test is now disabled in the current test suite because the DB unique constraint intentionally prevents that failure in the current schema. The baseline result is preserved as the pre-constraint observation.
+
+## 6. Strategy 2: DB Unique Constraint
+
+Status: Completed.
+
+How it works:
+
+- Keep the application-level duplicate check as a fast pre-check.
+- Add a database UNIQUE constraint on `(userId, couponId)`.
+- Attempt to save the IssuedCoupon record inside the transaction.
+- If a concurrent insert already committed the same user-coupon pair, the database rejects the duplicate insert.
+- Convert the duplicate-key persistence failure into a duplicate issuance failure.
+
+Why it solves duplicate issuance:
+
+The application-level check can still race, but the database constraint is evaluated at insert time. Only one row for the same user and coupon can commit.
+
+Schema verification note:
+
+`spring.jpa.hibernate.ddl-auto=update` may not automatically add a new UNIQUE constraint to an already existing table.
+The actual database schema was therefore checked with `psql` using `\d issued_coupons` to confirm that the unique constraint existed before relying on the experiment result.
+
+Observed result:
+
+- Test scenario:
+  - Coupon stock: 1,000
+  - Concurrent requests: 100
+  - Users: same user repeated 100 times for the same coupon
+- Expected result:
+  - successCount = 1
+  - failCount = 99
+  - issuedCouponCountByUserAndCoupon = 1
+- Observed result:
+  - successCount = 1
+  - failCount = 99
+  - issuedCouponCountByUserAndCoupon = 1
+
+Why the result occurred:
+
+Multiple requests can still pass the duplicate pre-check before the first insert is committed. The difference is that the database now rejects every duplicate `(userId, couponId)` insert after the first successful one. This makes duplicate prevention deterministic at the persistence boundary.
+
+Scope limitation:
+
+This strategy solves duplicate issuance for the same user and coupon. It does not solve overselling or inventory-record mismatch for many distinct users requesting the same limited-stock coupon.
+
+## 7. Strategy 3: Pessimistic Lock
 
 How it works:
 
@@ -194,7 +241,7 @@ What should be verified:
 - No duplicate IssuedCoupon records.
 - Lock strategy does not create inventory-record mismatch.
 
-## 7. Strategy 3: Optimistic Lock
+## 8. Strategy 4: Optimistic Lock
 
 How it works:
 
@@ -238,7 +285,7 @@ Recommended experiment split:
 - First test: optimistic lock without retry, focused on conflict detection.
 - Later test: optimistic lock with bounded retry, focused on reaching stock-limited success count.
 
-## 8. Strategy 4: Atomic Update
+## 9. Strategy 5: Atomic Update
 
 How it works:
 
@@ -278,7 +325,7 @@ Important design point:
 
 Atomic stock update alone does not fully solve duplicate issuance. The design still needs a unique constraint on `(userId, couponId)` and clear transaction behavior when the insert fails.
 
-## 9. Strategy 5: Redis Counter
+## 10. Strategy 6: Redis Counter
 
 How it works:
 
@@ -321,7 +368,7 @@ Recommended role:
 
 Redis Counter should be treated as a front-line traffic control strategy, not the only source of truth, unless the design explicitly handles reconciliation.
 
-## 10. Strategy 6: Redis Lua Script
+## 11. Strategy 7: Redis Lua Script
 
 How it works:
 
@@ -364,7 +411,7 @@ Recommended role:
 
 Redis Lua Script is suitable for high-traffic first-come issuance where stock and duplicate checks must be fast and atomic before database persistence.
 
-## 11. Test Data Design
+## 12. Test Data Design
 
 Overselling test:
 
@@ -389,26 +436,26 @@ Combined test:
 - Users: mixture of repeated and distinct users
 - Expected behavior: stock is not exceeded and duplicate issuance is not allowed
 
-The first implementation should start with separate tests for overselling and duplicate issuance. Combined tests can be added after each problem is understood independently.
-The separate transaction-only baseline tests have reproduced both overselling and duplicate issuance. Combined tests remain a later comparison point after each consistency strategy is evaluated.
+The first implementation started with separate tests for overselling and duplicate issuance. The transaction-only baseline reproduced both failures.
+The DB unique constraint experiment then verified duplicate issuance prevention. Combined tests remain a later comparison point after each stock-control strategy is evaluated.
 
-## 12. Suggested Experiment Order
+## 13. Suggested Experiment Order
 
 Recommended order:
 
-1. Transaction-only baseline for overselling.
-2. Transaction-only baseline for duplicate issuance.
-3. Add database unique constraint for duplicate issuance.
-4. Pessimistic lock for stock control.
-5. Optimistic lock for stock control without retry.
-6. Atomic update for stock control.
-7. Redis counter for traffic gating.
-8. Redis Lua script for stock and duplicate checks.
+1. Transaction-only baseline for overselling. Completed.
+2. Transaction-only baseline for duplicate issuance. Completed.
+3. Add database unique constraint for duplicate issuance. Completed.
+4. Pessimistic lock for stock control. Planned.
+5. Optimistic lock for stock control without retry. Planned.
+6. Atomic update for stock control. Planned.
+7. Redis counter for traffic gating. Planned.
+8. Redis Lua script for stock and duplicate checks. Planned.
 
 This order keeps the learning path clear. It first shows what breaks, then adds one consistency mechanism at a time.
-Steps 1 and 2 have been completed as baseline reproductions. The experiment order remains unchanged for the remaining strategy comparisons.
+Steps 1 through 3 have been completed. The experiment order remains unchanged for the remaining strategy comparisons.
 
-## 13. Expected Portfolio Narrative
+## 14. Expected Portfolio Narrative
 
 The Coupon experiment should demonstrate that first-come issuance is not only a CRUD problem.
 

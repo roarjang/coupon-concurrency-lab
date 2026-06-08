@@ -187,20 +187,188 @@ Observed result:
 - finalBalance = 0
 - expectedBalanceBySuccessCount = 0
 
-## Phase 7. Redis
+## Phase 7. Coupon Domain - Transaction-Only Baseline
+
+Status: Done
+
+Goal:
+
+Implement coupon issuance with service-level `@Transactional`, but without explicit stock or duplicate consistency control.
+
+Implemented features:
+
+- Coupon entity
+- IssuedCoupon entity
+- Coupon repository
+- IssuedCoupon repository
+- Transaction-only coupon issuance service path
+- Concurrency test for overselling reproduction
+- Concurrency test for duplicate issuance reproduction
+
+Overselling scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+
+Expected result with correct concurrency control:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 1000
+- failCount = 0
+- issuedCouponCountByCoupon = 1000
+- finalIssuedQuantity = 100
+
+Conclusion:
+
+`@Transactional` alone does not protect the stock check and increment under concurrent requests.
+IssuedCoupon records exceeded the configured stock, and `Coupon.issuedQuantity` diverged from the actual issued record count.
+
+Duplicate issuance scenario:
+
+- Coupon stock: 1,000
+- Concurrent requests: 100
+- User: same user requesting the same coupon
+
+Expected result with correct duplicate control:
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+Observed baseline result before applying the DB unique constraint:
+
+- successCount = 10
+- failCount = 90
+- issuedCouponCountByUserAndCoupon = 10
+
+Conclusion:
+
+The application-level duplicate check can race.
+Multiple transactions can read "not issued yet" before any committed insert is visible.
+
+## Phase 8. Coupon Duplicate Issuance - DB Unique Constraint
+
+Status: Done
+
+Goal:
+
+Use a database unique constraint as the final guard against duplicate issuance for the same user and coupon.
+
+Implemented approach:
+
+- Add UNIQUE constraint for `(userId, couponId)` on IssuedCoupon
+- Keep application-level duplicate check as a fast pre-check
+- Catch duplicate-key persistence failure and treat it as duplicate issuance failure
+- Verify the result with a dedicated concurrency test
+
+Schema verification note:
+
+`spring.jpa.hibernate.ddl-auto=update` may not automatically add a new UNIQUE constraint to an already existing table.
+For this experiment, the actual database schema was checked with `psql` using `\d issued_coupons` to confirm that the unique constraint existed.
+
+Test scenario:
+
+- Coupon stock: 1,000
+- Concurrent requests: 100
+- User: same user requesting the same coupon
+
+Expected result:
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+Observed result:
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+Conclusion:
+
+The database constraint prevents duplicate rows even when concurrent requests pass the application-level duplicate check.
+This solves duplicate issuance for one user and one coupon, but it does not solve coupon stock overselling.
+
+## Phase 9. Coupon Stock Control - Pessimistic Lock
 
 Status: Planned
 
 Goal:
 
-Use Redis later for coupon issuance or traffic control experiments.
+Serialize updates to the same Coupon row with a database write lock.
 
-Redis is not actively used in the current Point implementation.
+Expected behavior:
 
-## Phase 8. Product, Coupon, IssuedCoupon, Order
+- Success count should match coupon stock.
+- IssuedCoupon count should match coupon stock.
+- `Coupon.issuedQuantity` should match the issued record count.
+
+## Phase 10. Coupon Stock Control - Optimistic Lock
 
 Status: Planned
 
 Goal:
 
-Implement the remaining domains after the Point concurrency baseline and locking experiments are documented clearly.
+Use Coupon versioning to detect concurrent stock update conflicts.
+
+Expected behavior:
+
+- Silent lost update should be prevented.
+- Without retry, success count may be lower than stock under high contention.
+- Final issued quantity should match successful issued records.
+
+## Phase 11. Coupon Stock Control - Atomic Update
+
+Status: Planned
+
+Goal:
+
+Use a conditional database update to check and increment stock atomically.
+
+Expected behavior:
+
+- Requests should update stock only while `issuedQuantity < totalQuantity`.
+- Success count should not exceed coupon stock.
+- IssuedCoupon creation and stock update must remain transactionally consistent.
+
+## Phase 12. Coupon Traffic Control - Redis Counter
+
+Status: Planned
+
+Goal:
+
+Use Redis as a fast front-line stock gate before database persistence.
+
+Expected behavior:
+
+- Redis accepted count should not exceed coupon stock.
+- DB persistence and Redis acceptance must be reconciled or explicitly documented.
+
+## Phase 13. Coupon Traffic Control - Redis Lua Script
+
+Status: Planned
+
+Goal:
+
+Use a Redis Lua script to atomically check stock and duplicate state in Redis.
+
+Expected behavior:
+
+- Redis should atomically reject requests after stock exhaustion.
+- Redis should reject repeated user-coupon requests when duplicate control is included.
+- DB consistency after Redis acceptance still needs explicit handling.
+
+## Phase 14. Product and Order Domains
+
+Status: Planned
+
+Goal:
+
+Implement product lookup, order creation, coupon application to payment, and coupon usage consistency experiments after coupon issuance strategies are documented clearly.

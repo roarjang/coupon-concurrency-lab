@@ -34,16 +34,18 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 11. 선착순 쿠폰 발급 transaction-only baseline
 12. 쿠폰 초과 발급 동시성 재현
 13. 동일 사용자 쿠폰 중복 발급 동시성 재현
+14. DB UNIQUE(user_id, coupon_id) 제약 조건을 통한 중복 발급 방지 실험
+15. UNIQUE 제약 조건 적용 후 중복 발급 방지 동시성 테스트
 
 현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전, 조건부 UPDATE 적용 버전을 비교합니다.
-현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급과 중복 발급 문제를 재현하는 단계입니다.
+현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급을 재현하고, 동일 사용자 중복 발급 문제는 DB UNIQUE 제약 조건으로 방지하는 단계까지 검증했습니다.
 Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
 
 1. 상품 조회
-2. 쿠폰 발급 정합성 보장 전략 비교
-3. 쿠폰 중복 발급 방지
+2. 쿠폰 재고 정합성 보장 전략 비교
+3. 쿠폰 중복 발급 방지 전략 추가 비교
 4. 쿠폰 적용 결제
 5. 내 쿠폰 조회
 6. 테스트용 쿠폰 데이터 세팅
@@ -51,7 +53,8 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ## 4. 동시성 실험 설계
 
-쿠폰 발급 도메인은 transaction-only baseline까지 구현되었으며, 초과 발급과 동일 사용자 중복 발급 문제가 재현되었습니다.
+쿠폰 발급 도메인은 transaction-only baseline과 DB UNIQUE 제약 조건 실험까지 구현되었습니다.
+transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발급 문제가 재현되었고, UNIQUE 제약 조건 적용 후에는 동일 사용자 중복 발급 방지가 검증되었습니다.
 상품, 주문 기반 결제 도메인과 쿠폰 사용 실험은 아직 계획 단계입니다.
 
 ### 4.1. 쿠폰 초과 발급
@@ -125,6 +128,30 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 이 결과는 애플리케이션 레벨의 중복 조회만으로는 동일 사용자와 동일 쿠폰 조합의 유일성을 보장할 수 없음을 보여줍니다.
 중복 발급 방지는 이후 DB UNIQUE 제약 조건을 포함한 전략에서 비교합니다.
+
+#### 관측 결과: DB UNIQUE 제약 조건 적용
+
+테스트 시나리오:
+
+- 쿠폰 재고: 1,000
+- 동시 요청 수: 100
+- 사용자 조건: 동일 사용자 1명이 같은 쿠폰에 대해 100번 동시 요청
+- 적용 전략: `UNIQUE(user_id, coupon_id)` 제약 조건과 중복 키 예외 처리
+
+정합성이 보장된다면 다음 결과가 나와야 합니다.
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+UNIQUE 제약 조건 적용 후 다음 결과가 관측되었습니다.
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+여러 트랜잭션이 동시에 애플리케이션 레벨 중복 조회를 통과하더라도, 데이터베이스가 동일한 `(user_id, coupon_id)` 조합의 두 번째 insert를 거부합니다.
+따라서 하나의 요청만 발급에 성공하고 나머지 요청은 중복 키 위반으로 실패하여, 최종 발급 내역은 1건으로 유지됩니다.
 
 ### 4.3. 쿠폰 중복 사용
 
@@ -229,8 +256,8 @@ AND balance >= :amount
 
 | 실험 | 주요 문제 | 적용 전략 |
 | --- | --- | --- |
-| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only baseline 재현 완료, Redis atomic counter 계획 |
-| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id) 계획 |
+| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only baseline 재현 완료, stock control 전략 계획 |
+| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id) 적용 완료 |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
 | 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock, atomic update 적용 완료 |
 
@@ -258,27 +285,14 @@ AND balance >= :amount
 현재 Point에는 낙관적 락 충돌 감지를 위한 `@Version` 필드가 있습니다.
 잔액이 0 이상이어야 한다는 조건은 현재 DB check constraint가 아니라 `Point.deduct()`의 애플리케이션 레벨 검증으로 처리합니다.
 
-### 6.2 계획됨
-
-### Product
-- id
-- name
-- price
-- createdAt
-- updatedAt
-
 ### Coupon
 - id
 - name
 - discountAmount
 - totalQuantity
 - issuedQuantity
-- version
-- status
-- issueStartAt
-- issueEndAt
 - createdAt
-- expiredAt
+- updatedAt
 
 ### IssuedCoupon
 - id
@@ -288,6 +302,22 @@ AND balance >= :amount
 - issuedAt
 - usedAt
 - 제약 조건: UNIQUE(userId, couponId)
+
+### 6.2 계획됨
+
+### Product
+- id
+- name
+- price
+- createdAt
+- updatedAt
+
+### Coupon 확장 필드
+- version
+- status
+- issueStartAt
+- issueEndAt
+- expiredAt
 
 ### Order
 - id
@@ -305,13 +335,16 @@ AND balance >= :amount
 
 - User.email: UNIQUE
 - Point.userId: UNIQUE
-- IssuedCoupon(userId, couponId): UNIQUE (계획)
+- IssuedCoupon(userId, couponId): UNIQUE
 - Point.balance: 0 이상이어야 함 (현재 애플리케이션 레벨 검증, DB check constraint 아님)
-- Coupon.totalQuantity: 0 이상 (계획)
-- Coupon.issuedQuantity: 0 이상 (계획)
-- IssuedCoupon.status: ISSUED, USED, EXPIRED (계획)
+- Coupon.totalQuantity: 0 이상이어야 함 (DB check constraint는 계획)
+- Coupon.issuedQuantity: 0 이상이어야 함 (현재 `Coupon.issue()`에서 재고 초과 검증, DB check constraint는 계획)
+- IssuedCoupon.status: ISSUED, USED, EXPIRED
 - Order.status: CREATED, PAID, FAILED, CANCELED (계획)
 - Order.finalPrice: 0 이상 (계획)
+
+주의: `spring.jpa.hibernate.ddl-auto=update` 환경에서는 이미 생성된 테이블에 새 UNIQUE 제약 조건이 자동 반영되지 않을 수 있습니다.
+따라서 `IssuedCoupon(userId, couponId)` UNIQUE 제약 조건 적용 여부는 실제 DB에서 `psql`의 `\d issued_coupons` 명령으로 확인했습니다.
 
 ## 7. 검증 방법
 

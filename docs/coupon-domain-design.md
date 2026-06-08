@@ -40,11 +40,11 @@ Out of scope for the first Coupon phase:
 - Redis-based production traffic control.
 - Distributed lock implementation.
 
-## 3. Coupon Entity Proposal
+## 3. Coupon Entity Design
 
 The Coupon entity represents a coupon campaign or coupon definition.
 
-Proposed fields:
+Implemented fields:
 
 | Field | Purpose |
 | --- | --- |
@@ -53,13 +53,18 @@ Proposed fields:
 | discountAmount | Fixed discount amount |
 | totalQuantity | Maximum number of coupons that can be issued |
 | issuedQuantity | Number of coupons already issued |
+| createdAt | Creation timestamp |
+| updatedAt | Update timestamp |
+
+Planned extension fields:
+
+| Field | Purpose |
+| --- | --- |
 | status | Coupon campaign status such as ACTIVE, INACTIVE, ENDED |
 | issueStartAt | Start time for issuance |
 | issueEndAt | End time for issuance |
 | expiredAt | Expiration time for issued coupons |
 | version | Version field for optimistic lock experiments |
-| createdAt | Creation timestamp |
-| updatedAt | Update timestamp |
 
 Important invariants:
 
@@ -68,13 +73,13 @@ Important invariants:
 - `issuedQuantity` must not exceed `totalQuantity`.
 - Only active coupons within the issue period can be issued.
 
-The first implementation may keep status and time validation simple, but the fields should be designed so later payment and expiration workflows can build on them.
+The first implementation keeps status and time validation out of scope. Those fields remain planned so later payment, expiration, and optimistic locking workflows can build on them.
 
-## 4. IssuedCoupon Entity Proposal
+## 4. IssuedCoupon Entity Design
 
 The IssuedCoupon entity represents the coupon owned by a specific user.
 
-Proposed fields:
+Implemented fields:
 
 | Field | Purpose |
 | --- | --- |
@@ -87,12 +92,12 @@ Proposed fields:
 
 Important constraints:
 
-- `(userId, couponId)` should be unique.
+- `(userId, couponId)` is unique.
 - A user can have at most one IssuedCoupon for the same Coupon.
 - Status starts as ISSUED.
 - USED and EXPIRED statuses are planned for payment and lifecycle phases.
 
-The unique constraint is important because application-level duplicate checks alone can fail under concurrent requests. Even if two requests pass a duplicate check at the same time, the database must reject one of them.
+The unique constraint is important because application-level duplicate checks alone can fail under concurrent requests. Even if two requests pass a duplicate check at the same time, the database rejects all but one committed row for the same user and coupon.
 
 ## 5. Relationship Between User, Coupon, and IssuedCoupon
 
@@ -145,7 +150,8 @@ Assumptions:
 - The Point domain concurrency experiments are complete.
 - Coupon issuance transaction-only baseline is implemented.
 - Overselling and duplicate issuance have been reproduced with the transaction-only baseline.
-- Database lock, optimistic lock, atomic update, and Redis strategies are planned follow-up phases.
+- DB unique constraint duplicate-prevention experiment is implemented and verified.
+- Pessimistic lock, optimistic lock, atomic update, and Redis stock-control strategies are planned follow-up phases.
 - Product, Order, and payment coupon usage are planned but not part of the first Coupon issuance phase.
 - PostgreSQL is the main consistency store.
 - Redis is available as a dependency but should be introduced only in later Coupon strategy phases.
@@ -190,7 +196,9 @@ Inventory consistency:
 Duplicate consistency:
 
 - A user must not receive the same coupon more than once.
-- The database should enforce uniqueness with `(userId, couponId)`.
+- The database enforces uniqueness with `(userId, couponId)`.
+- The observed DB unique constraint result was successCount = 1, failCount = 99, and issuedCouponCountByUserAndCoupon = 1 under 100 concurrent duplicate requests.
+- In a `ddl-auto=update` environment, an added UNIQUE constraint may not be applied automatically to an existing table, so the actual `issued_coupons` schema was verified with `psql` using `\d issued_coupons`.
 
 Transaction consistency:
 
@@ -220,6 +228,10 @@ Duplicate issuance:
 The same user sends concurrent requests for the same coupon. Both requests pass the application-level duplicate check before either inserts the IssuedCoupon record.
 This has been reproduced with the transaction-only baseline: with stock 1,000 and 100 concurrent requests from the same user, the observed result was successCount = 10, failCount = 90, and issuedCouponCountByUserAndCoupon = 10.
 
+Duplicate issuance prevention:
+
+The DB unique constraint prevents more than one IssuedCoupon row for the same user and coupon. With stock 1,000 and 100 concurrent requests from the same user, the observed result after applying the constraint was successCount = 1, failCount = 99, and issuedCouponCountByUserAndCoupon = 1.
+
 Inventory and issued record mismatch:
 
 The system increments `issuedQuantity` but fails to create the IssuedCoupon record, or creates an IssuedCoupon without correctly updating inventory.
@@ -233,9 +245,10 @@ Redis may count a request as accepted, but database persistence may later fail. 
 The Coupon domain should follow the same learning pattern as the Point domain:
 
 1. Implement a transaction-only baseline and reproduce the problem.
-2. Apply database locking and compare results.
-3. Apply optimistic versioning and observe conflict behavior.
-4. Apply conditional update for efficient database-side control.
-5. Introduce Redis counter and Lua script strategies for first-come traffic control.
+2. Add database unique constraint for duplicate issuance.
+3. Apply database locking and compare results.
+4. Apply optimistic versioning and observe conflict behavior.
+5. Apply conditional update for efficient database-side control.
+6. Introduce Redis counter and Lua script strategies for first-come traffic control.
 
-The first step has been completed for overselling and duplicate issuance. The remaining steps stay in the same experiment order and should be compared against the observed baseline results.
+The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The remaining steps stay in the same experiment order and should be compared against the observed baseline results.
