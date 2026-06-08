@@ -31,14 +31,18 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 8. 포인트 차감 비관적 락 실험
 9. 포인트 차감 낙관적 락 실험
 10. 포인트 차감 조건부 UPDATE 실험
+11. 선착순 쿠폰 발급 transaction-only baseline
+12. 쿠폰 초과 발급 동시성 재현
+13. 동일 사용자 쿠폰 중복 발급 동시성 재현
 
 현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전, 조건부 UPDATE 적용 버전을 비교합니다.
+현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급과 중복 발급 문제를 재현하는 단계입니다.
 Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
 
 1. 상품 조회
-2. 선착순 쿠폰 발급
+2. 쿠폰 발급 정합성 보장 전략 비교
 3. 쿠폰 중복 발급 방지
 4. 쿠폰 적용 결제
 5. 내 쿠폰 조회
@@ -47,7 +51,8 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ## 4. 동시성 실험 설계
 
-쿠폰, 상품, 주문 기반 결제 도메인은 아직 구현되지 않았으며, 아래 쿠폰/결제 실험은 계획된 실험 설계입니다.
+쿠폰 발급 도메인은 transaction-only baseline까지 구현되었으며, 초과 발급과 동일 사용자 중복 발급 문제가 재현되었습니다.
+상품, 주문 기반 결제 도메인과 쿠폰 사용 실험은 아직 계획 단계입니다.
 
 ### 4.1. 쿠폰 초과 발급
 
@@ -57,6 +62,35 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 - 해결 전략: Redis 원자 연산으로 선착순 요청 수를 제한하고, DB에는 최종 발급 내역을 저장한다.
 - 검증 기준: 최종 발급 수량은 정확히 100개여야 한다.
 
+#### 관측 결과: transaction-only baseline
+
+테스트 시나리오:
+
+- 쿠폰 재고: 100
+- 동시 요청 수: 1,000
+- 사용자 조건: 1,000명의 서로 다른 사용자
+
+정합성이 보장된다면 다음 결과가 나와야 합니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+현재 `@Transactional` 기반 쿠폰 발급 baseline에서는 다음 결과가 관측되었습니다.
+
+- successCount = 1000
+- failCount = 0
+- issuedCouponCountByCoupon = 1000
+- finalIssuedQuantity = 100
+
+발급 내역은 1,000건 생성되었지만 쿠폰 재고는 100개뿐입니다.
+또한 `finalIssuedQuantity`는 100으로 남아 있어 실제 발급 내역 수와 쿠폰의 발급 수량 값이 서로 일치하지 않습니다.
+이는 여러 트랜잭션이 같은 쿠폰 재고 상태를 동시에 읽고 발급 가능하다고 판단한 뒤, 각자 발급 내역을 저장한 concurrency failure입니다.
+
+이 결과는 쿠폰 재고 확인, 발급 수량 증가, 발급 내역 저장을 하나의 트랜잭션 안에서 처리하더라도 동시 접근 자체가 직렬화되지는 않는다는 점을 보여줍니다.
+따라서 transaction-only baseline은 문제 재현용 기준선으로 보존하고, 이후 락/조건부 UPDATE/Redis 전략과 비교합니다.
+
 ### 4.2. 쿠폰 중복 발급
 
 - 조건: 동일 사용자가 같은 쿠폰에 대해 동시에 여러 번 발급 요청
@@ -64,6 +98,33 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 - naive 구현의 한계: 애플리케이션에서만 중복 여부를 검사하면 동시에 들어온 요청을 모두 통과시킬 수 있다.
 - 해결 전략: DB의 UNIQUE(user_id, coupon_id) 제약 조건과 트랜잭션을 함께 사용한다.
 - 검증 기준: 한 사용자는 동일 쿠폰을 1개만 발급받을 수 있어야 한다.
+
+#### 관측 결과: transaction-only baseline
+
+테스트 시나리오:
+
+- 쿠폰 재고: 1,000
+- 동시 요청 수: 100
+- 사용자 조건: 동일 사용자 1명이 같은 쿠폰에 대해 100번 동시 요청
+
+정합성이 보장된다면 다음 결과가 나와야 합니다.
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByUserAndCoupon = 1
+
+현재 `@Transactional` 기반 쿠폰 발급 baseline에서는 다음 결과가 관측되었습니다.
+
+- successCount = 10
+- failCount = 90
+- issuedCouponCountByUserAndCoupon = 10
+
+동일 사용자와 동일 쿠폰 조합의 발급 내역이 10건 생성되었습니다.
+한 사용자는 같은 쿠폰을 1개만 발급받아야 하므로, 이는 중복 발급 방어가 실패한 결과입니다.
+동시에 실행된 여러 트랜잭션이 모두 "아직 발급받지 않음" 상태를 읽고 발급 로직을 통과했기 때문에 발생한 concurrency failure입니다.
+
+이 결과는 애플리케이션 레벨의 중복 조회만으로는 동일 사용자와 동일 쿠폰 조합의 유일성을 보장할 수 없음을 보여줍니다.
+중복 발급 방지는 이후 DB UNIQUE 제약 조건을 포함한 전략에서 비교합니다.
 
 ### 4.3. 쿠폰 중복 사용
 
@@ -168,8 +229,8 @@ AND balance >= :amount
 
 | 실험 | 주요 문제 | 적용 전략 |
 | --- | --- | --- |
-| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | Redis atomic counter (계획) |
-| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | UNIQUE(user_id, coupon_id) (계획) |
+| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only baseline 재현 완료, Redis atomic counter 계획 |
+| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id) 계획 |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
 | 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock, atomic update 적용 완료 |
 

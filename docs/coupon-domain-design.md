@@ -143,7 +143,9 @@ Assumptions:
 
 - User signup and authentication already exist.
 - The Point domain concurrency experiments are complete.
-- Coupon issuance is the next isolated domain experiment.
+- Coupon issuance transaction-only baseline is implemented.
+- Overselling and duplicate issuance have been reproduced with the transaction-only baseline.
+- Database lock, optimistic lock, atomic update, and Redis strategies are planned follow-up phases.
 - Product, Order, and payment coupon usage are planned but not part of the first Coupon issuance phase.
 - PostgreSQL is the main consistency store.
 - Redis is available as a dependency but should be introduced only in later Coupon strategy phases.
@@ -207,6 +209,7 @@ Redis consistency, when introduced later:
 Overselling:
 
 Multiple requests read the same `issuedQuantity`, all see available stock, and all create issued coupons. Final issued count can exceed `totalQuantity`.
+This has been reproduced with the transaction-only baseline: with stock 100 and 1,000 concurrent requests from distinct users, the observed result was successCount = 1000, failCount = 0, issuedCouponCountByCoupon = 1000, and finalIssuedQuantity = 100.
 
 Lost update:
 
@@ -215,6 +218,7 @@ Several transactions increment `issuedQuantity` from the same old value. Some in
 Duplicate issuance:
 
 The same user sends concurrent requests for the same coupon. Both requests pass the application-level duplicate check before either inserts the IssuedCoupon record.
+This has been reproduced with the transaction-only baseline: with stock 1,000 and 100 concurrent requests from the same user, the observed result was successCount = 10, failCount = 90, and issuedCouponCountByUserAndCoupon = 10.
 
 Inventory and issued record mismatch:
 
@@ -234,4 +238,4 @@ The Coupon domain should follow the same learning pattern as the Point domain:
 4. Apply conditional update for efficient database-side control.
 5. Introduce Redis counter and Lua script strategies for first-come traffic control.
 
-This sequence keeps the portfolio narrative clear: first reproduce the failure, then compare increasingly specialized consistency strategies with evidence from tests.
+The first step has been completed for overselling and duplicate issuance. The remaining steps stay in the same experiment order and should be compared against the observed baseline results.

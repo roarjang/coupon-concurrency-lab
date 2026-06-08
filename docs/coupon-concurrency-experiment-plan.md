@@ -6,7 +6,7 @@ This document defines the concurrency experiment roadmap for first-come coupon i
 
 The goal is to reproduce and solve overselling and duplicate issuance problems under concurrent requests. The structure follows the Point domain experiment style: start with a simple transaction-only baseline, observe the failure, then compare multiple consistency strategies.
 
-This document is a design proposal. It does not define implementation code.
+This document started as a design proposal. The transaction-only coupon baseline has now been implemented, and the observed baseline failures are recorded below. Later consistency strategies remain planned experiments.
 
 ## 2. Target Scenario
 
@@ -108,6 +108,54 @@ What should be verified:
 - Whether IssuedCoupon count exceeds stock.
 - Whether duplicate records are created for the same user and coupon.
 - Whether `issuedQuantity` and IssuedCoupon count diverge.
+
+Observed baseline result:
+
+The transaction-only baseline has reproduced both target failures.
+
+Overselling experiment:
+
+- Test scenario:
+  - Coupon stock: 100
+  - Concurrent requests: 1,000
+  - Users: 1,000 distinct users
+- Expected result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+- Observed result:
+  - successCount = 1000
+  - failCount = 0
+  - issuedCouponCountByCoupon = 1000
+  - finalIssuedQuantity = 100
+
+This is a concurrency failure because 1,000 issued coupon records were created for a coupon with stock 100. The final `issuedQuantity` stayed at 100, so the Coupon aggregate state and the IssuedCoupon records also diverged. `@Transactional` did not serialize the stock check and increment across concurrent requests.
+
+Duplicate issuance experiment:
+
+- Test scenario:
+  - Coupon stock: 1,000
+  - Concurrent requests: 100
+  - Users: same user repeated 100 times for the same coupon
+- Expected result:
+  - successCount = 1
+  - failCount = 99
+  - issuedCouponCountByUserAndCoupon = 1
+- Observed result:
+  - successCount = 10
+  - failCount = 90
+  - issuedCouponCountByUserAndCoupon = 10
+
+This is a concurrency failure because the same user received the same coupon 10 times. Multiple requests passed the application-level duplicate check before a committed insert became visible, showing that application checks alone are insufficient.
+
+Observed conclusion:
+
+- `@Transactional` alone does not serialize access to the Coupon row.
+- The stock check and `issuedQuantity` increment can race.
+- The duplicate check and IssuedCoupon insert can race.
+- Final database assertions are required because request counters alone can hide inventory-record divergence.
+- A database unique constraint on `(userId, couponId)` is required as the final guard for duplicate issuance.
 
 ## 6. Strategy 2: Pessimistic Lock
 
@@ -342,6 +390,7 @@ Combined test:
 - Expected behavior: stock is not exceeded and duplicate issuance is not allowed
 
 The first implementation should start with separate tests for overselling and duplicate issuance. Combined tests can be added after each problem is understood independently.
+The separate transaction-only baseline tests have reproduced both overselling and duplicate issuance. Combined tests remain a later comparison point after each consistency strategy is evaluated.
 
 ## 12. Suggested Experiment Order
 
@@ -357,6 +406,7 @@ Recommended order:
 8. Redis Lua script for stock and duplicate checks.
 
 This order keeps the learning path clear. It first shows what breaks, then adds one consistency mechanism at a time.
+Steps 1 and 2 have been completed as baseline reproductions. The experiment order remains unchanged for the remaining strategy comparisons.
 
 ## 13. Expected Portfolio Narrative
 
