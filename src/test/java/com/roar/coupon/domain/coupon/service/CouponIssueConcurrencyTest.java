@@ -35,7 +35,7 @@ class CouponIssueConcurrencyTest {
     private static final int OVERSELLING_INITIAL_STOCK = 100;
     private static final int OVERSELLING_REQUEST_COUNT = 1000;
 
-    private static final int DUPLICATE_ISSUE_STOCK = 1000;
+    private static final int DUPLICATE_ISSUE_SAFETY_STOCK = 1000;
     private static final int DUPLICATE_ISSUE_REQUEST_COUNT = 100;
 
     @Autowired
@@ -83,21 +83,21 @@ class CouponIssueConcurrencyTest {
         // then
         Coupon result = couponRepository.findById(couponId)
                 .orElseThrow();
-        long issuedCouponCount = issuedCouponRepository.countByCouponId(couponId);
+        long issuedCouponCountByCoupon = issuedCouponRepository.countByCouponId(couponId);
 
         System.out.println("[Test 1: Transaction Only Can Oversell Coupon Stock]");
         System.out.println("successCount = " + concurrencyResult.successCount());
         System.out.println("failCount = " + concurrencyResult.failCount());
-        System.out.println("issuedCouponCount = " + issuedCouponCount);
+        System.out.println("issuedCouponCountByCoupon = " + issuedCouponCountByCoupon);
         System.out.println("finalIssuedQuantity = " + result.getIssuedQuantity());
 
         assertThat(concurrencyResult.totalCount()).isEqualTo(OVERSELLING_REQUEST_COUNT);
-        assertThat(issuedCouponCount).isGreaterThan((long) OVERSELLING_INITIAL_STOCK);
+        assertThat(issuedCouponCountByCoupon).isGreaterThan((long) OVERSELLING_INITIAL_STOCK);
         assertThat(result.getIssuedQuantity()).isLessThanOrEqualTo(OVERSELLING_INITIAL_STOCK);
     }
 
     @Test
-    @DisplayName("@Transactional만 적용한 쿠폰 발급은 동일 사용자 중복 발급을 허용한다")
+    @DisplayName("@Transactional만 적용한 쿠폰 발급은 동일 사용자 중복 발급이 발생한다")
     void concurrentIssue_transactionOnly_canIssueDuplicateCouponToSameUser() throws InterruptedException {
 
         // given
@@ -110,7 +110,7 @@ class CouponIssueConcurrencyTest {
         );
 
         Coupon savedCoupon = couponRepository.save(
-                new Coupon("중복 발급 테스트 쿠폰", DISCOUNT_AMOUNT, DUPLICATE_ISSUE_STOCK)
+                new Coupon("중복 발급 테스트 쿠폰", DISCOUNT_AMOUNT, DUPLICATE_ISSUE_SAFETY_STOCK)
         );
         Long couponId = savedCoupon.getId();
 
@@ -161,15 +161,21 @@ class CouponIssueConcurrencyTest {
             executorService.submit(() -> {
                 try {
                     readyLatch.countDown();
-                    startLatch.await();
+
+                    boolean started = startLatch.await(LATCH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                    if (!started) {
+                        throw new IllegalStateException("시작 신호를 제한 시간내에 받지 못했습니다.");
+                    }
 
                     testCouponIssueService.issueTransactionOnlyWithDelay(
                             userId,
                             couponId,
                             delayMillis
                     );
-
                     successCount.incrementAndGet();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    failCount.incrementAndGet();
                 } catch (Exception e) {
                     failCount.incrementAndGet();
                 } finally {
