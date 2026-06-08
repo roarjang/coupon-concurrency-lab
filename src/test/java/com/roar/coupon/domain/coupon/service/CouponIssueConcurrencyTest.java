@@ -7,12 +7,14 @@ import com.roar.coupon.domain.coupon.repository.IssuedCouponRepository;
 import com.roar.coupon.domain.user.entity.User;
 import com.roar.coupon.domain.user.repository.UserRepository;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
@@ -77,11 +79,12 @@ class CouponIssueConcurrencyTest {
         ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
                 userIds,
                 couponId,
-                ARTIFICIAL_DELAY_MILLIS
+                ARTIFICIAL_DELAY_MILLIS,
+                testCouponIssueService::issueTransactionOnlyWithDelay
         );
 
         // then
-        Coupon result = couponRepository.findById(couponId)
+        Coupon savedCouponAfterIssue = couponRepository.findById(couponId)
                 .orElseThrow();
         long issuedCouponCountByCoupon = issuedCouponRepository.countByCouponId(couponId);
 
@@ -89,16 +92,17 @@ class CouponIssueConcurrencyTest {
         System.out.println("successCount = " + concurrencyResult.successCount());
         System.out.println("failCount = " + concurrencyResult.failCount());
         System.out.println("issuedCouponCountByCoupon = " + issuedCouponCountByCoupon);
-        System.out.println("finalIssuedQuantity = " + result.getIssuedQuantity());
+        System.out.println("finalIssuedQuantity = " + savedCouponAfterIssue.getIssuedQuantity());
 
         assertThat(concurrencyResult.totalCount()).isEqualTo(OVERSELLING_REQUEST_COUNT);
         assertThat(issuedCouponCountByCoupon).isGreaterThan((long) OVERSELLING_INITIAL_STOCK);
-        assertThat(result.getIssuedQuantity()).isLessThanOrEqualTo(OVERSELLING_INITIAL_STOCK);
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isLessThanOrEqualTo(OVERSELLING_INITIAL_STOCK);
     }
 
+    @Disabled("DB Unique Constraint 적용 전 baseline 실패 재현 테스트 (현재는 git history/docs로 보존)")
     @Test
-    @DisplayName("@Transactional만 적용한 쿠폰 발급은 동일 사용자 중복 발급이 발생한다")
-    void concurrentIssue_transactionOnly_canIssueDuplicateCouponToSameUser() throws InterruptedException {
+    @DisplayName("@Transactional만 적용한 쿠폰 발급은 동일 사용자 동일 쿠폰의 중복 발급을 허용한다")
+    void concurrentIssue_transactionOnly_allowsIssueDuplicateCouponToSameUser() throws InterruptedException {
 
         // given
         User savedUser = userRepository.save(
@@ -109,10 +113,9 @@ class CouponIssueConcurrencyTest {
                 )
         );
 
-        Coupon savedCoupon = couponRepository.save(
+        Long couponId = couponRepository.save(
                 new Coupon("중복 발급 테스트 쿠폰", DISCOUNT_AMOUNT, DUPLICATE_ISSUE_SAFETY_STOCK)
-        );
-        Long couponId = savedCoupon.getId();
+        ).getId();
 
         List<Long> duplicateRequestUserIds = createRepeatedUserIds(
                 savedUser.getId(),
@@ -123,7 +126,8 @@ class CouponIssueConcurrencyTest {
         ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
                 duplicateRequestUserIds,
                 couponId,
-                ARTIFICIAL_DELAY_MILLIS
+                ARTIFICIAL_DELAY_MILLIS,
+                testCouponIssueService::issueTransactionOnlyWithDelay
         );
 
         // then
@@ -141,10 +145,51 @@ class CouponIssueConcurrencyTest {
         assertThat(issuedCouponCountByUserAndCoupon).isGreaterThan(1L);
     }
 
+    @Test
+    @DisplayName("DB Unique Constraint을 적용한 쿠폰 발급은 동시 사용자 동일 쿠폰의 중복 발급을 막는다")
+    void concurrentIssue_dbUniqueConstraint_preventsDuplicateCouponIssueToSameUser()
+        throws InterruptedException {
+
+        // given
+        User savedUser = userRepository.save(
+                User.create(
+                        "duplicate-solve@test.com",
+                        "encoded-password",
+                        "duplicate-solve-user"
+                )
+        );
+
+        Long couponId = couponRepository.save(
+                new Coupon("중복 쿠폰 발급 해결 테스트", DISCOUNT_AMOUNT, DUPLICATE_ISSUE_SAFETY_STOCK)
+        ).getId();
+
+        List<Long> duplicateRequestUserIds = createRepeatedUserIds(savedUser.getId(), DUPLICATE_ISSUE_REQUEST_COUNT);
+
+        // when
+        ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
+                duplicateRequestUserIds,
+                couponId,
+                ARTIFICIAL_DELAY_MILLIS,
+                testCouponIssueService::issueTransactionOnlyWithUniqueConstraintHandling
+        );
+
+        long issuedCouponCountByUserAndCoupon = issuedCouponRepository.countByUserIdAndCouponId(savedUser.getId(), couponId);
+
+        // then
+        System.out.println("[Test 3: DB Unique Constraint can Solve Issue Duplicate Coupon To Same User]");
+        System.out.println("successCount = " + concurrencyResult.successCount());
+        System.out.println("failCount = " + concurrencyResult.failCount());
+        System.out.println("issuedCouponCountByUserAndCoupon = " + issuedCouponCountByUserAndCoupon);
+
+        assertThat(concurrencyResult.totalCount()).isEqualTo(DUPLICATE_ISSUE_REQUEST_COUNT);
+        assertThat(issuedCouponCountByUserAndCoupon).isEqualTo(1L);
+    }
+
     private ConcurrencyResult runConcurrentIssueRequests(
             List<Long> userIds,
             Long couponId,
-            long delayMillis
+            long delayMillis,
+            CouponIssueAction issueStrategy
     ) throws InterruptedException {
         int requestCount = userIds.size();
 
@@ -167,11 +212,7 @@ class CouponIssueConcurrencyTest {
                         throw new IllegalStateException("시작 신호를 제한 시간내에 받지 못했습니다.");
                     }
 
-                    testCouponIssueService.issueTransactionOnlyWithDelay(
-                            userId,
-                            couponId,
-                            delayMillis
-                    );
+                    issueStrategy.issue(userId, couponId, delayMillis);
                     successCount.incrementAndGet();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -196,6 +237,11 @@ class CouponIssueConcurrencyTest {
                 successCount.get(),
                 failCount.get()
         );
+    }
+
+    @FunctionalInterface
+    interface CouponIssueAction {
+        void issue(Long userId, Long couponId, long delayMillis);
     }
 
     private List<User> createUsers(int count) {
@@ -279,6 +325,29 @@ class CouponIssueConcurrencyTest {
             coupon.issue();
 
             issuedCouponRepository.save(IssuedCoupon.issue(userId, couponId));
+        }
+
+        @Transactional
+        public void issueTransactionOnlyWithUniqueConstraintHandling(
+                Long userId,
+                Long couponId,
+                long delayMillis
+        ) {
+            Coupon coupon = couponRepository.findById(couponId)
+                    .orElseThrow(() -> new IllegalArgumentException("쿠폰을 찾을 수 없습니다."));
+
+            if (issuedCouponRepository.existsByUserIdAndCouponId(userId, couponId)) {
+                throw new IllegalArgumentException("이미 발급받은 쿠폰입니다.");
+            }
+
+            sleep(delayMillis);
+
+            coupon.issue();
+            try {
+                issuedCouponRepository.saveAndFlush(IssuedCoupon.issue(userId, couponId));
+            } catch (DataIntegrityViolationException e) {
+                throw new IllegalArgumentException("이미 발급받은 쿠폰입니다.", e);
+            }
         }
 
         private void sleep(long millis) {
