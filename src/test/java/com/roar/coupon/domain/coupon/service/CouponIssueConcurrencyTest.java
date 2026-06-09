@@ -47,6 +47,9 @@ class CouponIssueConcurrencyTest {
     private static final int OPTIMISTIC_LOCK_STOCK = 100;
     private static final int OPTIMISTIC_LOCK_REQUEST_COUNT = 1000;
 
+    private static final int ATOMIC_UPDATE_STOCK = 100;
+    private static final int ATOMIC_UPDATE_REQUEST_COUNT = 1000;
+
     @Autowired
     private TestCouponIssueService testCouponIssueService;
 
@@ -290,6 +293,57 @@ class CouponIssueConcurrencyTest {
         assertThat(savedCouponAfterIssue.getIssuedQuantity()).isLessThanOrEqualTo(OPTIMISTIC_LOCK_STOCK);
     }
 
+    @Test
+    @DisplayName("원자적 업데이트를 적용한 쿠폰 발급은 동시 요청에서 재고 초과 발급을 막는다")
+    void concurrentIssue_atomicUpdate_preventsCouponStockOverselling()
+        throws InterruptedException {
+
+        // given
+        List<User> savedUsers = userRepository.saveAll(
+                createUsers(ATOMIC_UPDATE_REQUEST_COUNT)
+        );
+
+        Coupon coupon = couponRepository.save(
+                new Coupon("원자적 업데이트 테스트 쿠폰",
+                        DISCOUNT_AMOUNT,
+                        ATOMIC_UPDATE_STOCK)
+        );
+        Long couponId = coupon.getId();
+
+        List<Long> userIds = savedUsers.stream()
+                .map(User::getId)
+                .toList();
+
+        // when
+        ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
+                userIds,
+                couponId,
+                LOCK_HOLD_MILLIS,
+                testCouponIssueService::issueWithAtomicUpdate
+        );
+
+        Coupon savedCouponAfterIssue = couponRepository.findById(couponId)
+                .orElseThrow(() -> new IllegalArgumentException("쿠폰을 찾을 수 없습니다."));
+
+        long issuedCouponCountByCoupon = issuedCouponRepository.countByCouponId(couponId);
+
+        // then
+        System.out.println("[Test 6: Atomic Update Prevents Coupon Stock Overselling]");
+        System.out.println("successCount = " + concurrencyResult.successCount());
+        System.out.println("failCount = " + concurrencyResult.failCount());
+        System.out.println("issuedCouponCountByCoupon = " + issuedCouponCountByCoupon);
+        System.out.println("finalIssuedQuantity = " + savedCouponAfterIssue.getIssuedQuantity());
+
+        assertThat(concurrencyResult.totalCount()).isEqualTo(ATOMIC_UPDATE_REQUEST_COUNT);
+        assertThat(concurrencyResult.successCount()).isEqualTo(ATOMIC_UPDATE_STOCK);
+        assertThat(concurrencyResult.failCount()).isEqualTo(ATOMIC_UPDATE_REQUEST_COUNT - ATOMIC_UPDATE_STOCK);
+
+        assertThat(issuedCouponCountByCoupon).isEqualTo(ATOMIC_UPDATE_STOCK);
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isEqualTo(ATOMIC_UPDATE_STOCK);
+        assertThat(issuedCouponCountByCoupon).isEqualTo(savedCouponAfterIssue.getIssuedQuantity());
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isLessThanOrEqualTo(savedCouponAfterIssue.getTotalQuantity());
+    }
+
     private ConcurrencyResult runConcurrentIssueRequests(
             List<Long> userIds,
             Long couponId,
@@ -490,6 +544,27 @@ class CouponIssueConcurrencyTest {
             sleep(holdMillis);
 
             coupon.issue();
+            issuedCouponRepository.save(IssuedCoupon.issue(userId, couponId));
+        }
+
+        @Transactional
+        public void issueWithAtomicUpdate(
+                Long userId,
+                Long couponId,
+                long holdMillis
+        ) {
+            if (issuedCouponRepository.existsByUserIdAndCouponId(userId, couponId)) {
+                throw new IllegalArgumentException("이미 발급받은 쿠폰입니다.");
+            }
+
+            sleep(holdMillis);
+
+            int updatedRows = couponRepository.increaseIssuedQuantityIfStockAvailable(couponId);
+
+            if (updatedRows == 0) {
+                throw new IllegalArgumentException("쿠폰 수량이 모두 소진되었습니다.");
+            }
+
             issuedCouponRepository.save(IssuedCoupon.issue(userId, couponId));
         }
 
