@@ -29,6 +29,9 @@ public class Coupon {
     @Column(nullable = false)
     private int issuedQuantity;
 
+    @Version
+    private Long version;
+
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
