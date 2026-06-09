@@ -455,10 +455,35 @@ Goal:
 
 Use Redis as a fast front-line stock gate before database persistence.
 
+Planned approach:
+
+- Add a Redis-based coupon stock gate as a separate issuance strategy
+- Use an atomic Redis counter operation to reserve only the first stock-sized request slots
+- Reject requests whose Redis counter value exceeds coupon stock before they perform DB persistence
+- Persist accepted requests to PostgreSQL as the durable source of truth
+- Keep the DB UNIQUE constraint on `(userId, couponId)` as the duplicate issuance guard
+- Document whether DB persistence failure after Redis acceptance is only a known limitation or handled with compensation
+
+Planned test scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+
 Expected behavior:
 
 - Redis accepted count should not exceed coupon stock.
+- successCount should be 100.
+- failCount should be 900.
+- issuedCouponCountByCoupon should be 100.
+- finalIssuedQuantity should be 100.
 - DB persistence and Redis acceptance must be reconciled or explicitly documented.
+
+Scope limitation:
+
+This phase is for Redis front-line stock gating only.
+It does not solve duplicate issuance by itself; duplicate issuance remains the responsibility of the DB UNIQUE constraint on `(userId, couponId)`.
+Redis-side duplicate tracking is deferred to the Redis Lua Script phase.
 
 ## Phase 13. Coupon Traffic Control - Redis Lua Script
 

@@ -494,6 +494,10 @@ AND balance >= :amount
 
 1. 쿠폰 발급 전략 비교
    - 완료된 DB pessimistic lock, optimistic lock, atomic update 결과를 기준으로 Redis atomic counter 방식의 결과와 성능을 비교한다.
+   - 다음 단계는 Redis Counter를 DB 저장 전 front-line stock gate로 적용하는 것이다.
+   - Redis Counter 실험은 쿠폰 재고 100개, 동시 요청 1,000개, 서로 다른 사용자 조건에서 successCount 100, failCount 900, issuedCouponCountByCoupon 100, finalIssuedQuantity 100을 목표로 한다.
+   - Redis Counter는 재고 gate 역할만 담당하며, 동일 사용자 중복 발급 방지는 계속 `UNIQUE(user_id, coupon_id)` 제약 조건이 담당한다.
+   - Redis에서 발급 가능으로 처리된 뒤 DB 저장이 실패하는 경우의 불일치 위험은 구현에서 보상하거나 관측 결과 문서에 명시한다.
 
 2. 낙관적 락 재시도 전략 추가
    - 현재는 충돌 감지만 검증하며, 이후 retry를 적용했을 때 최종 성공/실패 결과가 어떻게 달라지는지 비교한다.

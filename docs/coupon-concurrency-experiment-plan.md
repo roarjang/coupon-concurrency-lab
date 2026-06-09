@@ -431,12 +431,15 @@ The stock-control test uses different users, so duplicate-key contention is not 
 
 ## 10. Strategy 6: Redis Counter
 
+Status: Planned.
+
 How it works:
 
 - Redis keeps a counter for issued coupon requests.
 - Each request increments the Redis counter.
 - If the counter is within stock, the request is allowed to proceed to DB persistence.
 - If the counter exceeds stock, the request is rejected quickly.
+- PostgreSQL remains the final source of truth for persisted Coupon and IssuedCoupon state.
 
 Why it can solve overselling at the front line:
 
@@ -464,9 +467,43 @@ What should be verified:
 
 - Redis accepted count does not exceed stock.
 - DB issued count matches accepted successful persistence.
+- Final `Coupon.issuedQuantity` matches DB issued count.
 - Failed DB persistence is handled or documented.
 - Requests after stock exhaustion are rejected quickly.
 - Duplicate requests are not accepted if duplicate control is included.
+
+Planned experiment scope:
+
+- Test scenario:
+  - Coupon stock: 100
+  - Concurrent requests: 1,000
+  - Users: 1,000 distinct users
+- Redis role:
+  - Use Redis as a fast stock gate before database persistence.
+  - Count accepted stock slots with an atomic Redis operation.
+  - Reject requests whose Redis sequence is greater than coupon stock.
+- Database role:
+  - Persist successful issuance records in PostgreSQL.
+  - Keep the DB unique constraint on `(userId, couponId)` as the duplicate issuance guard.
+  - Keep database-side stock consistency as the final verification target.
+- Expected result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+  - Redis accepted count = 100
+
+Initial implementation direction:
+
+The first Redis Counter phase should focus on stock gating for distinct-user issuance, not Redis-side duplicate tracking.
+The service can use Redis to decide whether a request is allowed to reach DB persistence, while PostgreSQL remains responsible for durable state.
+If DB persistence fails after Redis accepts a request, the phase should either document the mismatch risk or add an explicit compensation path. That decision should be recorded with the observed result.
+
+Duplicate issuance scope:
+
+Redis Counter alone does not solve duplicate issuance. It only limits the number of accepted stock slots.
+Same-user duplicate requests still require the DB unique constraint on `(userId, couponId)` unless Redis user tracking is added in a later strategy.
+Redis Lua Script is the planned follow-up for atomically checking stock and duplicate state together in Redis.
 
 Recommended role:
 

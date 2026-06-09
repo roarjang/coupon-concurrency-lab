@@ -200,7 +200,8 @@ Assumptions:
 - Pessimistic lock stock-control experiment is implemented and verified.
 - Optimistic lock stock-control experiment is implemented and verified.
 - Atomic update stock-control experiment is implemented and verified.
-- Redis stock-control strategies are planned follow-up phases.
+- Redis Counter is the next planned stock-control strategy.
+- Redis Lua Script remains a later planned strategy for Redis-side stock and duplicate checks.
 - Product, Order, and payment coupon usage are planned but not part of the first Coupon issuance phase.
 - PostgreSQL is the main consistency store.
 - Redis is available as a dependency but should be introduced only in later Coupon strategy phases.
@@ -260,6 +261,17 @@ Redis consistency, when introduced later:
 - Redis may accept or reject requests faster than the database.
 - The design must consider what happens if Redis succeeds but DB persistence fails.
 - Compensation or reconciliation may be needed for production-grade designs.
+
+Planned Redis Counter scope:
+
+- Redis will be used as a front-line stock gate for first-come issuance.
+- The first Redis phase should use distinct users and focus on stock control, matching the database-centered stock tests.
+- Expected scenario: coupon stock 100, concurrent requests 1,000, expected successCount 100 and failCount 900.
+- PostgreSQL remains the durable source of truth for Coupon and IssuedCoupon records.
+- The DB unique constraint on `(userId, couponId)` remains responsible for duplicate issuance prevention.
+- Redis Counter does not track per-user issuance in this phase.
+- If Redis accepts a request but DB persistence fails, the implementation must either compensate or document the mismatch risk.
+- Redis Lua Script is the planned follow-up when stock and duplicate checks need to be atomic inside Redis.
 
 ## 10. Potential Concurrency Problems
 
