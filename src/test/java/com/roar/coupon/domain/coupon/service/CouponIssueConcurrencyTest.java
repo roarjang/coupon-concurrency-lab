@@ -31,7 +31,8 @@ import static org.assertj.core.api.AssertionsForClassTypes.assertThat;
 class CouponIssueConcurrencyTest {
 
     private static final long DISCOUNT_AMOUNT = 500L;
-    private static final long ARTIFICIAL_DELAY_MILLIS = 100L;
+    private static final long BASELINE_DELAY_MILLIS = 100L;
+    private static final long PESSIMISTIC_LOCK_HOLD_MILLIS = 5L;
     private static final long LATCH_TIMEOUT_SECONDS = 30L;
 
     private static final int OVERSELLING_INITIAL_STOCK = 100;
@@ -39,6 +40,9 @@ class CouponIssueConcurrencyTest {
 
     private static final int DUPLICATE_ISSUE_SAFETY_STOCK = 1000;
     private static final int DUPLICATE_ISSUE_REQUEST_COUNT = 100;
+
+    private static final int PESSIMISTIC_LOCK_STOCK = 100;
+    private static final int PESSIMISTIC_LOCK_REQUEST_COUNT = 1000;
 
     @Autowired
     private TestCouponIssueService testCouponIssueService;
@@ -79,7 +83,7 @@ class CouponIssueConcurrencyTest {
         ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
                 userIds,
                 couponId,
-                ARTIFICIAL_DELAY_MILLIS,
+                BASELINE_DELAY_MILLIS,
                 testCouponIssueService::issueTransactionOnlyWithDelay
         );
 
@@ -95,7 +99,7 @@ class CouponIssueConcurrencyTest {
         System.out.println("finalIssuedQuantity = " + savedCouponAfterIssue.getIssuedQuantity());
 
         assertThat(concurrencyResult.totalCount()).isEqualTo(OVERSELLING_REQUEST_COUNT);
-        assertThat(issuedCouponCountByCoupon).isGreaterThan((long) OVERSELLING_INITIAL_STOCK);
+        assertThat(issuedCouponCountByCoupon).isGreaterThan(OVERSELLING_INITIAL_STOCK);
         assertThat(savedCouponAfterIssue.getIssuedQuantity()).isLessThanOrEqualTo(OVERSELLING_INITIAL_STOCK);
     }
 
@@ -126,7 +130,7 @@ class CouponIssueConcurrencyTest {
         ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
                 duplicateRequestUserIds,
                 couponId,
-                ARTIFICIAL_DELAY_MILLIS,
+                BASELINE_DELAY_MILLIS,
                 testCouponIssueService::issueTransactionOnlyWithDelay
         );
 
@@ -169,7 +173,7 @@ class CouponIssueConcurrencyTest {
         ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
                 duplicateRequestUserIds,
                 couponId,
-                ARTIFICIAL_DELAY_MILLIS,
+                BASELINE_DELAY_MILLIS,
                 testCouponIssueService::issueTransactionOnlyWithUniqueConstraintHandling
         );
 
@@ -183,6 +187,53 @@ class CouponIssueConcurrencyTest {
 
         assertThat(concurrencyResult.totalCount()).isEqualTo(DUPLICATE_ISSUE_REQUEST_COUNT);
         assertThat(issuedCouponCountByUserAndCoupon).isEqualTo(1L);
+    }
+
+    @Test
+    @DisplayName("비관적 락을 적용한 쿠폰 발급은 동시 요청에서도 재고 수량만큼만 발급한다")
+    void concurrentIssue_pessimisticLock_preventsCouponStockOverselling()
+            throws InterruptedException {
+
+        // given
+        List<User> savedUsers = userRepository.saveAll(createUsers(PESSIMISTIC_LOCK_REQUEST_COUNT));
+
+        Coupon coupon = couponRepository.save(
+                new Coupon("비관적 락 테스트 쿠폰",
+                        DISCOUNT_AMOUNT,
+                        PESSIMISTIC_LOCK_STOCK)
+        );
+        Long couponId = coupon.getId();
+
+        List<Long> userIds = savedUsers.stream()
+                .map(User::getId)
+                .toList();
+
+        // when
+        ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
+                userIds,
+                couponId,
+                PESSIMISTIC_LOCK_HOLD_MILLIS,
+                testCouponIssueService::issueWithPessimisticLock
+        );
+
+        Coupon savedCouponAfterIssue = couponRepository.findById(couponId)
+                .orElseThrow(() -> new IllegalArgumentException("쿠폰을 찾을 수 없습니다."));
+        long issuedCouponCountByCoupon = issuedCouponRepository.countByCouponId(couponId);
+
+        // then
+        System.out.println("[Test 4: Pessimistic Lock Prevents Coupon Stock Overselling]");
+        System.out.println("successCount = " + concurrencyResult.successCount());
+        System.out.println("failCount = " + concurrencyResult.failCount());
+        System.out.println("issuedCouponCountByCoupon = " + issuedCouponCountByCoupon);
+        System.out.println("finalIssuedQuantity = " + savedCouponAfterIssue.getIssuedQuantity());
+
+        assertThat(concurrencyResult.totalCount()).isEqualTo(PESSIMISTIC_LOCK_REQUEST_COUNT);
+        assertThat(concurrencyResult.successCount()).isEqualTo(PESSIMISTIC_LOCK_STOCK);
+        assertThat(concurrencyResult.failCount()).isEqualTo(PESSIMISTIC_LOCK_REQUEST_COUNT - PESSIMISTIC_LOCK_STOCK);
+        assertThat(issuedCouponCountByCoupon).isEqualTo(PESSIMISTIC_LOCK_STOCK);
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isEqualTo(PESSIMISTIC_LOCK_STOCK);
+        assertThat((long) savedCouponAfterIssue.getIssuedQuantity()).isEqualTo(issuedCouponCountByCoupon);
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isLessThanOrEqualTo(savedCouponAfterIssue.getTotalQuantity());
     }
 
     private ConcurrencyResult runConcurrentIssueRequests(
@@ -345,6 +396,29 @@ class CouponIssueConcurrencyTest {
             coupon.issue();
             try {
                 issuedCouponRepository.saveAndFlush(IssuedCoupon.issue(userId, couponId));
+            } catch (DataIntegrityViolationException e) {
+                throw new IllegalArgumentException("이미 발급받은 쿠폰입니다.", e);
+            }
+        }
+
+        @Transactional
+        public void issueWithPessimisticLock(
+                Long userId,
+                Long couponId,
+                long holdMillis
+        ) {
+            Coupon coupon = couponRepository.findByIdWithPessimisticLock(couponId)
+                    .orElseThrow(() -> new IllegalArgumentException("쿠폰을 찾을 수 없습니다."));
+
+            if (issuedCouponRepository.existsByUserIdAndCouponId(userId, couponId)) {
+                throw new IllegalArgumentException("이미 발급받은 쿠폰입니다.");
+            }
+
+            sleep(holdMillis);
+
+            coupon.issue();
+            try {
+                issuedCouponRepository.save(IssuedCoupon.issue(userId, couponId));
             } catch (DataIntegrityViolationException e) {
                 throw new IllegalArgumentException("이미 발급받은 쿠폰입니다.", e);
             }
