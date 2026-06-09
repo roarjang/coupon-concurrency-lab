@@ -36,9 +36,12 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 13. 동일 사용자 쿠폰 중복 발급 동시성 재현
 14. DB UNIQUE(user_id, coupon_id) 제약 조건을 통한 중복 발급 방지 실험
 15. UNIQUE 제약 조건 적용 후 중복 발급 방지 동시성 테스트
+16. 쿠폰 재고 제어 비관적 락 실험
+17. 쿠폰 재고 제어 비관적 락 동시성 테스트
 
 현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전, 조건부 UPDATE 적용 버전을 비교합니다.
-현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급을 재현하고, 동일 사용자 중복 발급 문제는 DB UNIQUE 제약 조건으로 방지하는 단계까지 검증했습니다.
+현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급과 동일 사용자 중복 발급을 재현하고, 동일 사용자 중복 발급 문제는 DB UNIQUE 제약 조건으로 방지했습니다.
+쿠폰 재고 제어는 비관적 락을 적용해 stock 100, 동시 요청 1,000개 조건에서 발급 수량과 발급 내역 수가 모두 100건으로 유지되는 것을 검증했습니다.
 Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
@@ -53,8 +56,9 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ## 4. 동시성 실험 설계
 
-쿠폰 발급 도메인은 transaction-only baseline과 DB UNIQUE 제약 조건 실험까지 구현되었습니다.
+쿠폰 발급 도메인은 transaction-only baseline, DB UNIQUE 제약 조건, 쿠폰 재고 제어 비관적 락 실험까지 구현되었습니다.
 transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발급 문제가 재현되었고, UNIQUE 제약 조건 적용 후에는 동일 사용자 중복 발급 방지가 검증되었습니다.
+비관적 락 적용 후에는 같은 쿠폰 row의 재고 갱신이 직렬화되어 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
 상품, 주문 기반 결제 도메인과 쿠폰 사용 실험은 아직 계획 단계입니다.
 
 ### 4.1. 쿠폰 초과 발급
@@ -62,7 +66,7 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 - 조건: 쿠폰 수량 100개, 동시 요청 1,000개
 - 재현하려는 문제: 여러 요청이 동시에 쿠폰 재고를 읽고 갱신하면서 실제 재고보다 많은 쿠폰이 발급될 수 있다.
 - naive 구현의 한계: 단순히 현재 발급 수량을 조회한 뒤 증가시키는 방식은 race condition으로 인해 초과 발급이 발생할 수 있다.
-- 해결 전략: Redis 원자 연산으로 선착순 요청 수를 제한하고, DB에는 최종 발급 내역을 저장한다.
+- 해결 전략: 먼저 DB 비관적 락으로 같은 쿠폰 row의 재고 갱신을 직렬화하고, 이후 조건부 UPDATE/Redis 원자 연산 전략과 비교한다.
 - 검증 기준: 최종 발급 수량은 정확히 100개여야 한다.
 
 #### 관측 결과: transaction-only baseline
@@ -93,6 +97,34 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 
 이 결과는 쿠폰 재고 확인, 발급 수량 증가, 발급 내역 저장을 하나의 트랜잭션 안에서 처리하더라도 동시 접근 자체가 직렬화되지는 않는다는 점을 보여줍니다.
 따라서 transaction-only baseline은 문제 재현용 기준선으로 보존하고, 이후 락/조건부 UPDATE/Redis 전략과 비교합니다.
+
+#### 관측 결과: 비관적 락 적용
+
+테스트 시나리오:
+
+- 쿠폰 재고: 100
+- 동시 요청 수: 1,000
+- 사용자 조건: 1,000명의 서로 다른 사용자
+- 락 경합 관측용 지연: `PESSIMISTIC_LOCK_HOLD_MILLIS = 5L`
+
+정합성이 보장된다면 다음 결과가 나와야 합니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+비관적 락 적용 후 다음 결과가 관측되었습니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+- 테스트 소요 시간: 약 10초
+
+쿠폰 row를 `PESSIMISTIC_WRITE`로 조회한 뒤 재고 확인, 발급 수량 증가, 발급 내역 저장을 처리하면 같은 쿠폰에 대한 요청이 직렬화됩니다.
+따라서 100개 요청만 발급에 성공하고 이후 요청은 재고 소진으로 실패합니다.
+이 전략은 쿠폰 재고 초과 발급과 `Coupon.issuedQuantity`/IssuedCoupon record 불일치를 방지하지만, 동일 사용자 중복 발급의 최종 방어는 여전히 DB UNIQUE 제약 조건이 담당합니다.
 
 ### 4.2. 쿠폰 중복 발급
 
@@ -249,14 +281,14 @@ AND balance >= :amount
 - Redis: 대량의 선착순 요청을 빠르게 제한하는 앞단 제어 역할 (계획)
 - DB Transaction: 결제와 쿠폰 사용, 포인트 차감을 하나의 작업 단위로 보장
 - DB Unique Constraint: 중복 발급과 같은 정합성 조건을 DB 레벨에서 보장
-- Pessimistic Lock: 충돌 가능성이 높은 포인트 차감/쿠폰 사용 상황에서 동시 수정을 직렬화
+- Pessimistic Lock: 충돌 가능성이 높은 포인트 차감/쿠폰 발급/쿠폰 사용 상황에서 동시 수정을 직렬화
 - Optimistic Lock: 충돌이 적은 상황을 가정하고 version 기반으로 충돌을 감지
 
 ### 실험별 적용 전략
 
 | 실험 | 주요 문제 | 적용 전략 |
 | --- | --- | --- |
-| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only baseline 재현 완료, stock control 전략 계획 |
+| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only baseline 재현 완료, pessimistic lock 적용 완료 |
 | 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id) 적용 완료 |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
 | 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock, atomic update 적용 완료 |
@@ -377,7 +409,7 @@ AND balance >= :amount
 ## 8. 향후 개선
 
 1. 쿠폰 발급 전략 비교
-   - Redis atomic counter 방식과 DB lock 방식의 결과와 성능을 비교한다.
+   - 완료된 DB pessimistic lock 결과를 기준으로 optimistic lock, atomic update, Redis atomic counter 방식의 결과와 성능을 비교한다.
 
 2. 낙관적 락 재시도 전략 추가
    - 현재는 충돌 감지만 검증하며, 이후 retry를 적용했을 때 최종 성공/실패 결과가 어떻게 달라지는지 비교한다.

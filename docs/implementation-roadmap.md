@@ -298,17 +298,50 @@ This solves duplicate issuance for one user and one coupon, but it does not solv
 
 ## Phase 9. Coupon Stock Control - Pessimistic Lock
 
-Status: Planned
+Status: Done
 
 Goal:
 
 Serialize updates to the same Coupon row with a database write lock.
 
-Expected behavior:
+Implemented approach:
 
-- Success count should match coupon stock.
-- IssuedCoupon count should match coupon stock.
-- `Coupon.issuedQuantity` should match the issued record count.
+- Add a repository query that reads the Coupon row with `PESSIMISTIC_WRITE`
+- Keep the transaction-only coupon issuance path as the baseline
+- Add a separate pessimistic-lock issuance path for stock-control comparison
+- Check stock while holding the lock
+- Increase `issuedQuantity` and create IssuedCoupon in the same transaction
+- Verify the result with a dedicated concurrency test
+
+Test scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Lock hold delay for contention observation: `PESSIMISTIC_LOCK_HOLD_MILLIS = 5L`
+
+Expected result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+- test duration: about 10 seconds
+
+Conclusion:
+
+The pessimistic lock serializes concurrent stock checks and increments for the same Coupon row.
+IssuedCoupon records no longer exceed the configured stock, and `Coupon.issuedQuantity` stays consistent with the actual issued record count.
+
+This solves coupon stock overselling under the tested scenario.
+Duplicate issuance remains a separate consistency concern and is guarded by the DB UNIQUE constraint on `(userId, couponId)`.
 
 ## Phase 10. Coupon Stock Control - Optimistic Lock
 

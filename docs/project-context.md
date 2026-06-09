@@ -74,6 +74,8 @@ Not applied yet:
 - Duplicate issuance concurrency reproduction
 - DB unique constraint on `(userId, couponId)`
 - Duplicate issuance prevention test using the DB unique constraint
+- Pessimistic lock stock-control experiment
+- Pessimistic lock stock-control concurrency test
 
 The current Coupon implementation keeps the experiment scope focused on coupon issuance, not payment integration.
 
@@ -82,10 +84,10 @@ Completed coupon experiments:
 - Transaction-only baseline for overselling reproduction
 - Transaction-only baseline for duplicate issuance reproduction
 - DB unique constraint experiment for duplicate issuance prevention
+- Pessimistic lock experiment for coupon stock control
 
 Planned coupon experiments:
 
-- Pessimistic lock for stock control
 - Optimistic lock for stock control
 - Atomic update for stock control
 - Redis counter for traffic gating
@@ -93,15 +95,17 @@ Planned coupon experiments:
 
 ## Current Focus
 
-The current focus is the Coupon issuance domain.
+The current focus is still the Coupon issuance domain, now moving from the completed pessimistic-lock stock-control result to the remaining stock-control strategy comparisons.
 
 The Point domain has completed the baseline, pessimistic lock, optimistic lock, and atomic update comparison.
-The Coupon domain now follows the same learning pattern:
+The Coupon domain follows the same learning pattern:
 
 - Reproduce failures with a transaction-only baseline.
 - Add one consistency mechanism at a time.
 - Verify final database state under concurrent requests.
 - Preserve observed results for portfolio explanation.
+
+At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, and stock control with a pessimistic lock. Optimistic lock, atomic update, and Redis-based strategies remain planned comparisons.
 
 ## Transaction-Only Baseline Result
 
@@ -268,12 +272,43 @@ Observed result:
 This result shows that the database constraint acts as the final consistency guard.
 Even if multiple transactions pass the application-level duplicate check, only one insert can commit for the same user and coupon.
 
+## Coupon Pessimistic Lock Stock-Control Result
+
+The pessimistic lock version reads the Coupon row with a database write lock before checking and increasing `issuedQuantity`.
+
+Scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Lock hold delay for contention observation: `PESSIMISTIC_LOCK_HOLD_MILLIS = 5L`
+
+Expected correct result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+- test duration: about 10 seconds
+
+This result shows that row-level locking serializes stock updates for the same Coupon row.
+Only 100 requests can issue the coupon, and the Coupon inventory value stays consistent with the number of IssuedCoupon records.
+
+This strategy solves stock overselling for one Coupon row under the tested scenario.
+Duplicate issuance prevention is still handled by the DB unique constraint on `(userId, couponId)`.
+
 ## Planned Domains and Strategies
 
 - Product
 - Order
 - Coupon stock-control strategies:
-  - Pessimistic lock
   - Optimistic lock
   - Atomic update
   - Redis counter

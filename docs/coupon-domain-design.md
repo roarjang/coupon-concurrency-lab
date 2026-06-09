@@ -133,14 +133,29 @@ The concurrency challenge is that this check and the increment must be protected
 
 Several strategies will be compared:
 
-- Transaction-only read-modify-write baseline.
-- Pessimistic lock on the Coupon row.
+- Transaction-only read-modify-write baseline. Completed for failure reproduction.
+- DB unique constraint on `(userId, couponId)`. Completed for duplicate issuance prevention.
+- Pessimistic lock on the Coupon row. Completed for stock control.
 - Optimistic lock using Coupon version.
 - Atomic update using a conditional update query.
 - Redis counter for front-line traffic control.
 - Redis Lua script for atomic stock and duplicate control.
 
 The first database-centered strategies should update `issuedQuantity` and create `IssuedCoupon` inside a transaction. Redis strategies can be evaluated later as a high-throughput front-line guard, while still persisting final issuance records in the database.
+
+Observed pessimistic-lock stock-control result:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Lock hold delay for contention observation: `PESSIMISTIC_LOCK_HOLD_MILLIS = 5L`
+- Expected result: successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100
+- Observed result: successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100
+- Test duration: about 10 seconds
+
+The pessimistic lock strategy solves stock overselling by serializing concurrent updates to the same Coupon row.
+It also keeps `Coupon.issuedQuantity` aligned with the number of IssuedCoupon records for the tested stock scenario.
+It does not replace the duplicate-issuance guard, because duplicate issuance is a user-coupon uniqueness problem. The DB unique constraint remains the final protection for `(userId, couponId)`.
 
 ## 7. Assumptions and Constraints
 
@@ -151,7 +166,8 @@ Assumptions:
 - Coupon issuance transaction-only baseline is implemented.
 - Overselling and duplicate issuance have been reproduced with the transaction-only baseline.
 - DB unique constraint duplicate-prevention experiment is implemented and verified.
-- Pessimistic lock, optimistic lock, atomic update, and Redis stock-control strategies are planned follow-up phases.
+- Pessimistic lock stock-control experiment is implemented and verified.
+- Optimistic lock, atomic update, and Redis stock-control strategies are planned follow-up phases.
 - Product, Order, and payment coupon usage are planned but not part of the first Coupon issuance phase.
 - PostgreSQL is the main consistency store.
 - Redis is available as a dependency but should be introduced only in later Coupon strategy phases.
@@ -232,6 +248,12 @@ Duplicate issuance prevention:
 
 The DB unique constraint prevents more than one IssuedCoupon row for the same user and coupon. With stock 1,000 and 100 concurrent requests from the same user, the observed result after applying the constraint was successCount = 1, failCount = 99, and issuedCouponCountByUserAndCoupon = 1.
 
+Stock control with pessimistic lock:
+
+The pessimistic lock prevents multiple transactions from checking and incrementing the same Coupon row at the same time. With stock 100 and 1,000 concurrent requests from distinct users, the observed result after applying the lock was successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, and finalIssuedQuantity = 100.
+
+This is different from duplicate issuance prevention. Pessimistic lock protects the aggregate stock count for one Coupon row. The DB unique constraint protects the uniqueness of one user's IssuedCoupon for the same Coupon.
+
 Inventory and issued record mismatch:
 
 The system increments `issuedQuantity` but fails to create the IssuedCoupon record, or creates an IssuedCoupon without correctly updating inventory.
@@ -251,4 +273,4 @@ The Coupon domain should follow the same learning pattern as the Point domain:
 5. Apply conditional update for efficient database-side control.
 6. Introduce Redis counter and Lua script strategies for first-come traffic control.
 
-The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The remaining steps stay in the same experiment order and should be compared against the observed baseline results.
+The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The third step has been completed for stock control with a pessimistic lock. The remaining steps stay in the same experiment order and should be compared against the observed baseline and pessimistic-lock results.
