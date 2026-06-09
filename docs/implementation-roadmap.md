@@ -399,17 +399,53 @@ The earlier transaction-only overselling baseline is no longer an active reprodu
 
 ## Phase 11. Coupon Stock Control - Atomic Update
 
-Status: Planned
+Status: Done
 
 Goal:
 
 Use a conditional database update to check and increment stock atomically.
 
-Expected behavior:
+Implemented approach:
 
-- Requests should update stock only while `issuedQuantity < totalQuantity`.
-- Success count should not exceed coupon stock.
-- IssuedCoupon creation and stock update must remain transactionally consistent.
+- Add a conditional bulk update query to CouponRepository
+- Increment `issuedQuantity` only when `issuedQuantity < totalQuantity`
+- Use the update count as the stock availability decision
+- Create IssuedCoupon only after the stock update succeeds
+- Update `updatedAt` directly in the query because bulk updates bypass `@PreUpdate`
+- Keep duplicate issuance protection delegated to the DB UNIQUE constraint on `(userId, couponId)`
+
+Test scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+
+Expected result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Conclusion:
+
+The conditional update lets PostgreSQL check stock and increment `issuedQuantity` as one atomic operation.
+Only 100 requests updated the Coupon row, and the remaining 900 failed before creating IssuedCoupon records.
+This solves coupon stock overselling under the tested distinct-user scenario.
+
+This differs from pessimistic locking because requests do not hold a row lock across an entity read and domain method call.
+It differs from optimistic locking because stock control is decided by the conditional update count, not by loading a Coupon entity and handling version conflicts during flush.
+
+Duplicate issuance remains a separate concern and is still guarded by the DB UNIQUE constraint on `(userId, couponId)`.
+Because this stock-control test uses different users, `save` is enough for IssuedCoupon persistence in this phase; `saveAndFlush` is not required to force duplicate-key detection.
 
 ## Phase 12. Coupon Traffic Control - Redis Counter
 

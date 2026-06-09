@@ -40,10 +40,12 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 17. 쿠폰 재고 제어 비관적 락 동시성 테스트
 18. 쿠폰 재고 제어 낙관적 락 실험
 19. 쿠폰 재고 제어 낙관적 락 동시성 테스트
+20. 쿠폰 재고 제어 조건부 UPDATE 실험
+21. 쿠폰 재고 제어 조건부 UPDATE 동시성 테스트
 
 현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전, 조건부 UPDATE 적용 버전을 비교합니다.
 현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급과 동일 사용자 중복 발급을 재현한 뒤, 동일 사용자 중복 발급 문제는 DB UNIQUE 제약 조건으로 방지했습니다.
-쿠폰 재고 제어는 비관적 락과 낙관적 락을 적용해 stock 100, 동시 요청 1,000개 조건에서 발급 수량과 발급 내역 수가 모두 100건으로 유지되는 것을 검증했습니다.
+쿠폰 재고 제어는 비관적 락, 낙관적 락, 조건부 UPDATE를 적용해 stock 100, 동시 요청 1,000개 조건에서 발급 수량과 발급 내역 수가 모두 100건으로 유지되는 것을 검증했습니다.
 Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
@@ -58,10 +60,11 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ## 4. 동시성 실험 설계
 
-쿠폰 발급 도메인은 transaction-only baseline, DB UNIQUE 제약 조건, 쿠폰 재고 제어 비관적 락, 쿠폰 재고 제어 낙관적 락 실험까지 구현되었습니다.
+쿠폰 발급 도메인은 transaction-only baseline, DB UNIQUE 제약 조건, 쿠폰 재고 제어 비관적 락, 쿠폰 재고 제어 낙관적 락, 쿠폰 재고 제어 조건부 UPDATE 실험까지 구현되었습니다.
 transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발급 문제가 재현되었고, UNIQUE 제약 조건 적용 후에는 동일 사용자 중복 발급 방지가 검증되었습니다.
 비관적 락 적용 후에는 같은 쿠폰 row의 재고 갱신이 직렬화되어 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
 낙관적 락 적용 후에는 `Coupon.version` 기반 version check로 동시 갱신 충돌을 감지해 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
+조건부 UPDATE 적용 후에는 PostgreSQL이 `issuedQuantity < totalQuantity` 조건 확인과 발급 수량 증가를 하나의 UPDATE로 처리해 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
 상품, 주문 기반 결제 도메인과 쿠폰 사용 실험은 아직 계획 단계입니다.
 
 ### 4.1. 쿠폰 초과 발급
@@ -69,7 +72,7 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 - 조건: 쿠폰 수량 100개, 동시 요청 1,000개
 - 재현하려는 문제: 여러 요청이 동시에 쿠폰 재고를 읽고 갱신하면서 실제 재고보다 많은 쿠폰이 발급될 수 있다.
 - naive 구현의 한계: 단순히 현재 발급 수량을 조회한 뒤 증가시키는 방식은 race condition으로 인해 초과 발급이 발생할 수 있다.
-- 해결 전략: 먼저 DB 비관적 락으로 같은 쿠폰 row의 재고 갱신을 직렬화하고, 이후 조건부 UPDATE/Redis 원자 연산 전략과 비교한다.
+- 해결 전략: DB 비관적 락, 낙관적 락, 조건부 UPDATE를 비교하고, 이후 Redis 원자 연산 전략과 비교한다.
 - 검증 기준: 최종 발급 수량은 정확히 100개여야 한다.
 
 #### 관측 결과: transaction-only baseline
@@ -138,7 +141,7 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 - 쿠폰 재고: 100
 - 동시 요청 수: 1,000
 - 사용자 조건: 1,000명의 서로 다른 사용자
-- 충돌 관측용 지연: `LOCK_HOLD_MILLIS = 5L`
+- 경합 관측용 지연: `LOCK_HOLD_MILLIS = 5L`
 
 정합성이 보장된다면 다음 결과가 나와야 합니다.
 
@@ -157,6 +160,51 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 `Coupon` 엔티티에 `@Version` 필드를 추가하고 일반 조회 후 발급 수량을 증가시키면, JPA가 update 시점에 version mismatch를 감지합니다.
 충돌한 요청은 실패하고 커밋된 요청만 발급 내역을 생성하므로, 발급 내역 수와 `Coupon.issuedQuantity`가 모두 100건으로 유지됩니다.
 현재 실험은 retry 없이 충돌 감지와 최종 정합성만 검증합니다.
+
+#### 관측 결과: 조건부 UPDATE 적용
+
+테스트 시나리오:
+
+- 쿠폰 재고: 100
+- 동시 요청 수: 1,000
+- 사용자 조건: 1,000명의 서로 다른 사용자
+- 충돌 관측용 지연: `LOCK_HOLD_MILLIS = 5L`
+
+정합성이 보장된다면 다음 결과가 나와야 합니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+조건부 UPDATE 적용 후 다음 결과가 관측되었습니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+쿠폰을 먼저 엔티티로 조회해 수정하지 않고, PostgreSQL에서 다음 조건부 UPDATE로 재고 확인과 발급 수량 증가를 한 번에 처리합니다.
+
+```sql
+UPDATE coupons
+SET issued_quantity = issued_quantity + 1,
+    version = version + 1,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = :couponId
+AND issued_quantity < total_quantity
+```
+
+update row count가 1이면 재고 확보에 성공한 것이고, 0이면 재고가 소진된 것으로 판단합니다.
+따라서 100개 요청만 발급에 성공하고 이후 요청은 발급 내역을 생성하기 전에 실패합니다.
+
+이 방식은 비관적 락처럼 엔티티 조회부터 도메인 메서드 실행까지 row lock을 들고 진행하지 않고, 낙관적 락처럼 엔티티를 로딩한 뒤 flush 시점의 version conflict에 의존하지도 않습니다.
+재고 제어 판단은 조건부 UPDATE의 affected row count가 담당합니다.
+
+이 실험의 핵심은 재고 정합성입니다.
+다만 JPQL bulk update는 `@PreUpdate`를 우회하므로, `updatedAt`은 쿼리에서 직접 갱신했습니다.
+조건부 UPDATE만으로 동일 사용자 중복 발급을 해결하는 것은 아니며, 중복 발급의 최종 방어는 여전히 `UNIQUE(user_id, coupon_id)` 제약 조건이 담당합니다.
+이 재고 제어 테스트는 서로 다른 사용자로 실행되므로 IssuedCoupon 저장은 `save`로 충분하며, 중복 키 검출을 강제로 앞당기기 위한 `saveAndFlush`는 필요하지 않습니다.
 
 ### 4.2. 쿠폰 중복 발급
 
@@ -315,12 +363,13 @@ AND balance >= :amount
 - DB Unique Constraint: 중복 발급과 같은 정합성 조건을 DB 레벨에서 보장
 - Pessimistic Lock: 충돌 가능성이 높은 포인트 차감/쿠폰 발급/쿠폰 사용 상황에서 동시 수정을 직렬화
 - Optimistic Lock: 충돌이 적은 상황을 가정하고 version 기반으로 충돌을 감지
+- Atomic Update: 단순한 재고 증가나 잔액 차감 조건을 DB UPDATE 한 번으로 확인하고 갱신
 
 ### 실험별 적용 전략
 
 | 실험 | 주요 문제 | 적용 전략 |
 | --- | --- | --- |
-| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only historical baseline 재현 완료, pessimistic lock/optimistic lock 적용 완료 |
+| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only historical baseline 재현 완료, pessimistic lock/optimistic lock/atomic update 적용 완료 |
 | 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id) 적용 완료 |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
 | 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock, atomic update 적용 완료 |
@@ -419,7 +468,7 @@ AND balance >= :amount
 
 - JUnit과 ExecutorService를 사용해 동시에 여러 요청을 발생시킨다.
 - transaction-only baseline에서 먼저 race condition을 재현한다.
-- Redis, DB 제약 조건, 트랜잭션, 락을 적용한 구현에서 동일 조건으로 다시 검증한다.
+- Redis, DB 제약 조건, 트랜잭션, 락, 조건부 UPDATE를 적용한 구현에서 동일 조건으로 다시 검증한다.
 - 테스트 종료 후 DB 상태를 조회해 최종 정합성을 확인한다.
 
 ### 주요 검증 지표
@@ -444,7 +493,7 @@ AND balance >= :amount
 ## 8. 향후 개선
 
 1. 쿠폰 발급 전략 비교
-   - 완료된 DB pessimistic lock과 optimistic lock 결과를 기준으로 atomic update, Redis atomic counter 방식의 결과와 성능을 비교한다.
+   - 완료된 DB pessimistic lock, optimistic lock, atomic update 결과를 기준으로 Redis atomic counter 방식의 결과와 성능을 비교한다.
 
 2. 낙관적 락 재시도 전략 추가
    - 현재는 충돌 감지만 검증하며, 이후 retry를 적용했을 때 최종 성공/실패 결과가 어떻게 달라지는지 비교한다.

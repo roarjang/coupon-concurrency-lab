@@ -137,7 +137,7 @@ Several strategies will be compared:
 - DB unique constraint on `(userId, couponId)`. Completed for duplicate issuance prevention.
 - Pessimistic lock on the Coupon row. Completed for stock control.
 - Optimistic lock using Coupon version. Completed for stock control.
-- Atomic update using a conditional update query.
+- Atomic update using a conditional update query. Completed for stock control.
 - Redis counter for front-line traffic control.
 - Redis Lua script for atomic stock and duplicate control.
 
@@ -170,6 +170,24 @@ The optimistic lock strategy uses `Coupon.version` to reject stale concurrent up
 It keeps `Coupon.issuedQuantity` aligned with IssuedCoupon records in the tested stock scenario.
 This phase does not implement retry handling; it verifies conflict detection and final database consistency.
 
+Observed atomic-update stock-control result:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+- Expected result: successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100
+- Observed result: successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100
+
+The atomic update strategy uses a conditional bulk update so PostgreSQL increments `issuedQuantity` only when `issuedQuantity < totalQuantity`.
+The affected row count becomes the stock availability decision, so requests that arrive after stock exhaustion fail without creating IssuedCoupon records.
+This differs from pessimistic locking because the service does not hold a row lock across a read-modify-write flow.
+It differs from optimistic locking because the service does not load a Coupon entity and wait for JPA version conflict detection at flush time.
+
+The main purpose of this phase is stock consistency. `updatedAt` is secondary, but the implementation updates it directly in the query because bulk updates bypass `@PreUpdate`.
+The phase does not solve duplicate issuance by itself. The DB unique constraint on `(userId, couponId)` remains responsible for same-user duplicate prevention.
+Because the stock-control test uses different users, IssuedCoupon `save` is enough in this phase; `saveAndFlush` is not required to force duplicate-key detection.
+
 ## 7. Assumptions and Constraints
 
 Assumptions:
@@ -181,7 +199,8 @@ Assumptions:
 - DB unique constraint duplicate-prevention experiment is implemented and verified.
 - Pessimistic lock stock-control experiment is implemented and verified.
 - Optimistic lock stock-control experiment is implemented and verified.
-- Atomic update and Redis stock-control strategies are planned follow-up phases.
+- Atomic update stock-control experiment is implemented and verified.
+- Redis stock-control strategies are planned follow-up phases.
 - Product, Order, and payment coupon usage are planned but not part of the first Coupon issuance phase.
 - PostgreSQL is the main consistency store.
 - Redis is available as a dependency but should be introduced only in later Coupon strategy phases.
@@ -294,4 +313,4 @@ The Coupon domain should follow the same learning pattern as the Point domain:
 5. Apply conditional update for efficient database-side control.
 6. Introduce Redis counter and Lua script strategies for first-come traffic control.
 
-The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The third step has been completed for stock control with a pessimistic lock. The fourth step has been completed for stock control with optimistic locking. The remaining steps stay in the same experiment order and should be compared against the observed baseline, pessimistic-lock, and optimistic-lock results.
+The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The third step has been completed for stock control with a pessimistic lock. The fourth step has been completed for stock control with optimistic locking. The fifth step has been completed for stock control with atomic update. The remaining Redis steps stay in the same experiment order and should be compared against the observed baseline, pessimistic-lock, optimistic-lock, and atomic-update results.

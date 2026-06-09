@@ -78,6 +78,8 @@ Not applied yet:
 - Pessimistic lock stock-control concurrency test
 - Optimistic lock stock-control experiment using `Coupon.version`
 - Optimistic lock stock-control concurrency test
+- Atomic update stock-control experiment
+- Atomic update stock-control concurrency test
 
 The current Coupon implementation keeps the experiment scope focused on coupon issuance, not payment integration.
 
@@ -88,16 +90,16 @@ Completed coupon experiments:
 - DB unique constraint experiment for duplicate issuance prevention
 - Pessimistic lock experiment for coupon stock control
 - Optimistic lock experiment for coupon stock control
+- Atomic update experiment for coupon stock control
 
 Planned coupon experiments:
 
-- Atomic update for stock control
 - Redis counter for traffic gating
 - Redis Lua script for stock and duplicate checks
 
 ## Current Focus
 
-The current focus is still the Coupon issuance domain, now moving from the completed pessimistic-lock stock-control result to the remaining stock-control strategy comparisons.
+The current focus is still the Coupon issuance domain, now moving from completed database-centered stock-control results to the remaining Redis-based strategy comparisons.
 
 The Point domain has completed the baseline, pessimistic lock, optimistic lock, and atomic update comparison.
 The Coupon domain follows the same learning pattern:
@@ -107,7 +109,7 @@ The Coupon domain follows the same learning pattern:
 - Verify final database state under concurrent requests.
 - Preserve observed results for portfolio explanation.
 
-At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, and stock control with pessimistic and optimistic locks. Atomic update and Redis-based strategies remain planned comparisons.
+At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, and stock control with pessimistic lock, optimistic lock, and atomic update. Redis-based strategies remain planned comparisons.
 
 ## Transaction-Only Baseline Result
 
@@ -342,12 +344,48 @@ This result shows that optimistic locking prevents silent stock lost update.
 Conflicting requests fail instead of overwriting `issuedQuantity`, and the final Coupon row stays consistent with IssuedCoupon records.
 This phase verifies conflict detection without retry handling.
 
+## Coupon Atomic Update Stock-Control Result
+
+The atomic update version uses a conditional bulk update query.
+PostgreSQL increments `issuedQuantity` only when `issuedQuantity < totalQuantity`, and the affected row count decides whether stock was available.
+
+Scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+
+Expected correct result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+This result shows that the database can enforce stock availability and increment inventory atomically without loading the Coupon entity first.
+It differs from pessimistic locking because it does not hold a row lock through an entity read-modify-write flow.
+It differs from optimistic locking because it does not rely on JPA detecting a stale entity version at flush time.
+
+The implementation updates `updatedAt` directly in the query because JPQL bulk updates bypass `@PreUpdate`.
+This is a secondary implementation detail; the main experiment result is stock consistency.
+
+Atomic update does not solve duplicate issuance by itself.
+The DB unique constraint on `(userId, couponId)` remains responsible for same-user duplicate prevention.
+Because this stock-control test uses different users, IssuedCoupon `save` is enough in this phase; `saveAndFlush` is not required.
+
 ## Planned Domains and Strategies
 
 - Product
 - Order
 - Coupon stock-control strategies:
-  - Atomic update
   - Redis counter
   - Redis Lua script
 

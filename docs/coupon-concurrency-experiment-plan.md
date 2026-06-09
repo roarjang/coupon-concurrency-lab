@@ -6,7 +6,7 @@ This document defines the concurrency experiment roadmap for first-come coupon i
 
 The goal is to reproduce and solve overselling and duplicate issuance problems under concurrent requests. The structure follows the Point domain experiment style: start with a simple transaction-only baseline, observe the failure, then compare multiple consistency strategies.
 
-This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, pessimistic-lock stock-control experiment, and optimistic-lock stock-control experiment have now been implemented, and the observed results are recorded below. Later stock-control strategies remain planned experiments.
+This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, pessimistic-lock stock-control experiment, optimistic-lock stock-control experiment, and atomic-update stock-control experiment have now been implemented, and the observed results are recorded below. Later Redis-based stock-control strategies remain planned experiments.
 
 ## 2. Target Scenario
 
@@ -65,7 +65,7 @@ For the common stock test:
 | DB Unique Constraint | Prevent duplicate issuance for the same user and coupon | Completed: database uniqueness is the final duplicate guard |
 | Pessimistic Lock | Serialize coupon row updates | Completed: stock remains consistent with lock wait cost |
 | Optimistic Lock | Detect concurrent version conflicts | Completed: stock remains consistent by rejecting conflicting updates through `Coupon.version` |
-| Atomic Update | Use conditional database update | Planned: efficient for stock decrement or issued count increment |
+| Atomic Update | Use conditional database update | Completed: stock remains consistent by letting PostgreSQL atomically apply the stock condition and increment |
 | Redis Counter | Use Redis as a fast front-line stock gate | Planned: efficient traffic control, but DB reconciliation must be considered |
 | Redis Lua Script | Atomically check stock and duplicate state in Redis | Planned: stronger Redis-side atomicity, more operational complexity |
 
@@ -354,12 +354,15 @@ Adding `@Version` affects all Coupon update paths, so the original transaction-o
 
 ## 9. Strategy 5: Atomic Update
 
+Status: Completed.
+
 How it works:
 
 - Use one conditional database update to increase `issuedQuantity`.
 - The update succeeds only when `issuedQuantity < totalQuantity`.
 - The update count determines success or failure.
 - Create IssuedCoupon only after the inventory update succeeds.
+- Update `updatedAt` directly in the bulk update query.
 
 Why it can solve overselling:
 
@@ -391,6 +394,40 @@ What should be verified:
 Important design point:
 
 Atomic stock update alone does not fully solve duplicate issuance. The design still needs a unique constraint on `(userId, couponId)` and clear transaction behavior when the insert fails.
+
+Observed result:
+
+- Test scenario:
+  - Coupon stock: 100
+  - Concurrent requests: 1,000
+  - Users: 1,000 distinct users
+  - Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+- Expected result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+- Observed result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+
+Why the result occurred:
+
+PostgreSQL evaluates `issuedQuantity < totalQuantity` and increments `issuedQuantity` as one atomic update. Under 1,000 concurrent requests for stock 100, only 100 update statements affect a row. The remaining requests update zero rows and fail before creating IssuedCoupon records.
+
+The atomic update differs from pessimistic lock because it does not first read the Coupon row with a write lock and hold that lock through domain-level stock validation. It also differs from optimistic lock because it does not load a Coupon entity and then rely on JPA version-conflict detection during flush. The database update count is the stock decision.
+
+Bulk update note:
+
+The main point of this experiment is stock consistency. `updatedAt` is a secondary detail, but it is still documented because JPQL bulk updates bypass entity lifecycle callbacks such as `@PreUpdate`. The query therefore updates `updatedAt` directly with `CURRENT_TIMESTAMP`. The query also increments `version` directly because the Coupon entity has a version column from the optimistic-lock phase.
+
+Scope limitation:
+
+This phase controls aggregate stock for distinct-user issuance. It does not solve duplicate issuance by itself. Duplicate issuance remains the responsibility of the DB unique constraint on `(userId, couponId)`.
+
+The stock-control test uses different users, so duplicate-key contention is not the behavior under test. In this phase, saving the IssuedCoupon record with `save` is enough; `saveAndFlush` is not required to force duplicate detection during the stock-control scenario.
 
 ## 10. Strategy 6: Redis Counter
 
@@ -515,12 +552,12 @@ Recommended order:
 3. Add database unique constraint for duplicate issuance. Completed.
 4. Pessimistic lock for stock control. Completed.
 5. Optimistic lock for stock control without retry. Completed.
-6. Atomic update for stock control. Planned.
+6. Atomic update for stock control. Completed.
 7. Redis counter for traffic gating. Planned.
 8. Redis Lua script for stock and duplicate checks. Planned.
 
 This order keeps the learning path clear. It first shows what breaks, then adds one consistency mechanism at a time.
-Steps 1 through 5 have been completed. The experiment order remains unchanged for the remaining strategy comparisons.
+Steps 1 through 6 have been completed. The experiment order remains unchanged for the remaining Redis-based strategy comparisons.
 
 ## 14. Expected Portfolio Narrative
 
