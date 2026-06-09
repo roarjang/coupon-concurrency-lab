@@ -230,6 +230,12 @@ Conclusion:
 `@Transactional` alone does not protect the stock check and increment under concurrent requests.
 IssuedCoupon records exceeded the configured stock, and `Coupon.issuedQuantity` diverged from the actual issued record count.
 
+Note:
+
+This overselling baseline result was observed before adding `@Version` to the Coupon entity.
+After `@Version` is added, the transaction-only coupon stock path is also affected by optimistic lock version checking.
+The overselling reproduction test is therefore disabled in the current test suite and preserved as a historical baseline for docs and git history.
+
 Duplicate issuance scenario:
 
 - Coupon stock: 1,000
@@ -345,17 +351,51 @@ Duplicate issuance remains a separate consistency concern and is guarded by the 
 
 ## Phase 10. Coupon Stock Control - Optimistic Lock
 
-Status: Planned
+Status: Done
 
 Goal:
 
 Use Coupon versioning to detect concurrent stock update conflicts.
 
-Expected behavior:
+Implemented approach:
 
-- Silent lost update should be prevented.
-- Without retry, success count may be lower than stock under high contention.
-- Final issued quantity should match successful issued records.
+- Add `@Version` to the Coupon entity
+- Read Coupon normally without a database write lock
+- Let JPA detect version mismatch when concurrent transactions update the same Coupon row
+- Keep retry handling out of this phase
+- Verify final Coupon inventory and IssuedCoupon records with a dedicated concurrency test
+
+Test scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+
+Expected result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Conclusion:
+
+Optimistic locking prevents silent lost update by rejecting conflicting Coupon row updates through version mismatch.
+Under the tested scenario, successful issued records and `Coupon.issuedQuantity` both stayed at 100.
+This phase verifies conflict detection without retry handling.
+
+Side effect:
+
+Adding `@Version` changes the behavior of every update path for Coupon.
+The earlier transaction-only overselling baseline is no longer an active reproducible test in the current model and is kept disabled for historical documentation.
 
 ## Phase 11. Coupon Stock Control - Atomic Update
 

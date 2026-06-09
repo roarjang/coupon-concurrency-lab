@@ -53,6 +53,7 @@ Implemented fields:
 | discountAmount | Fixed discount amount |
 | totalQuantity | Maximum number of coupons that can be issued |
 | issuedQuantity | Number of coupons already issued |
+| version | Version field for optimistic lock experiments |
 | createdAt | Creation timestamp |
 | updatedAt | Update timestamp |
 
@@ -64,7 +65,6 @@ Planned extension fields:
 | issueStartAt | Start time for issuance |
 | issueEndAt | End time for issuance |
 | expiredAt | Expiration time for issued coupons |
-| version | Version field for optimistic lock experiments |
 
 Important invariants:
 
@@ -73,7 +73,7 @@ Important invariants:
 - `issuedQuantity` must not exceed `totalQuantity`.
 - Only active coupons within the issue period can be issued.
 
-The first implementation keeps status and time validation out of scope. Those fields remain planned so later payment, expiration, and optimistic locking workflows can build on them.
+The first implementation keeps status and time validation out of scope. Those fields remain planned so later payment and expiration workflows can build on them. Optimistic locking is now represented by the implemented `version` field.
 
 ## 4. IssuedCoupon Entity Design
 
@@ -136,7 +136,7 @@ Several strategies will be compared:
 - Transaction-only read-modify-write baseline. Completed for failure reproduction.
 - DB unique constraint on `(userId, couponId)`. Completed for duplicate issuance prevention.
 - Pessimistic lock on the Coupon row. Completed for stock control.
-- Optimistic lock using Coupon version.
+- Optimistic lock using Coupon version. Completed for stock control.
 - Atomic update using a conditional update query.
 - Redis counter for front-line traffic control.
 - Redis Lua script for atomic stock and duplicate control.
@@ -157,6 +157,19 @@ The pessimistic lock strategy solves stock overselling by serializing concurrent
 It also keeps `Coupon.issuedQuantity` aligned with the number of IssuedCoupon records for the tested stock scenario.
 It does not replace the duplicate-issuance guard, because duplicate issuance is a user-coupon uniqueness problem. The DB unique constraint remains the final protection for `(userId, couponId)`.
 
+Observed optimistic-lock stock-control result:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+- Expected result: successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100
+- Observed result: successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100
+
+The optimistic lock strategy uses `Coupon.version` to reject stale concurrent updates instead of allowing silent lost update.
+It keeps `Coupon.issuedQuantity` aligned with IssuedCoupon records in the tested stock scenario.
+This phase does not implement retry handling; it verifies conflict detection and final database consistency.
+
 ## 7. Assumptions and Constraints
 
 Assumptions:
@@ -167,7 +180,8 @@ Assumptions:
 - Overselling and duplicate issuance have been reproduced with the transaction-only baseline.
 - DB unique constraint duplicate-prevention experiment is implemented and verified.
 - Pessimistic lock stock-control experiment is implemented and verified.
-- Optimistic lock, atomic update, and Redis stock-control strategies are planned follow-up phases.
+- Optimistic lock stock-control experiment is implemented and verified.
+- Atomic update and Redis stock-control strategies are planned follow-up phases.
 - Product, Order, and payment coupon usage are planned but not part of the first Coupon issuance phase.
 - PostgreSQL is the main consistency store.
 - Redis is available as a dependency but should be introduced only in later Coupon strategy phases.
@@ -234,6 +248,7 @@ Overselling:
 
 Multiple requests read the same `issuedQuantity`, all see available stock, and all create issued coupons. Final issued count can exceed `totalQuantity`.
 This has been reproduced with the transaction-only baseline: with stock 100 and 1,000 concurrent requests from distinct users, the observed result was successCount = 1000, failCount = 0, issuedCouponCountByCoupon = 1000, and finalIssuedQuantity = 100.
+This is a historical baseline from before `Coupon.version` was added. The current overselling reproduction test is disabled because JPA version checking changes the transaction-only stock path.
 
 Lost update:
 
@@ -254,6 +269,12 @@ The pessimistic lock prevents multiple transactions from checking and incrementi
 
 This is different from duplicate issuance prevention. Pessimistic lock protects the aggregate stock count for one Coupon row. The DB unique constraint protects the uniqueness of one user's IssuedCoupon for the same Coupon.
 
+Stock control with optimistic lock:
+
+The optimistic lock uses `Coupon.version` to detect concurrent updates to the same Coupon row. With stock 100 and 1,000 concurrent requests from distinct users, the observed result after applying optimistic locking was successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, and finalIssuedQuantity = 100.
+
+This protects the aggregate stock count by rejecting stale updates rather than making transactions wait for a write lock. Duplicate issuance still remains the responsibility of the DB unique constraint on `(userId, couponId)`.
+
 Inventory and issued record mismatch:
 
 The system increments `issuedQuantity` but fails to create the IssuedCoupon record, or creates an IssuedCoupon without correctly updating inventory.
@@ -273,4 +294,4 @@ The Coupon domain should follow the same learning pattern as the Point domain:
 5. Apply conditional update for efficient database-side control.
 6. Introduce Redis counter and Lua script strategies for first-come traffic control.
 
-The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The third step has been completed for stock control with a pessimistic lock. The remaining steps stay in the same experiment order and should be compared against the observed baseline and pessimistic-lock results.
+The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The third step has been completed for stock control with a pessimistic lock. The fourth step has been completed for stock control with optimistic locking. The remaining steps stay in the same experiment order and should be compared against the observed baseline, pessimistic-lock, and optimistic-lock results.

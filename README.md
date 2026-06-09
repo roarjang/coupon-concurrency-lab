@@ -38,10 +38,12 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 15. UNIQUE 제약 조건 적용 후 중복 발급 방지 동시성 테스트
 16. 쿠폰 재고 제어 비관적 락 실험
 17. 쿠폰 재고 제어 비관적 락 동시성 테스트
+18. 쿠폰 재고 제어 낙관적 락 실험
+19. 쿠폰 재고 제어 낙관적 락 동시성 테스트
 
 현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전, 조건부 UPDATE 적용 버전을 비교합니다.
-현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급과 동일 사용자 중복 발급을 재현하고, 동일 사용자 중복 발급 문제는 DB UNIQUE 제약 조건으로 방지했습니다.
-쿠폰 재고 제어는 비관적 락을 적용해 stock 100, 동시 요청 1,000개 조건에서 발급 수량과 발급 내역 수가 모두 100건으로 유지되는 것을 검증했습니다.
+현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급과 동일 사용자 중복 발급을 재현한 뒤, 동일 사용자 중복 발급 문제는 DB UNIQUE 제약 조건으로 방지했습니다.
+쿠폰 재고 제어는 비관적 락과 낙관적 락을 적용해 stock 100, 동시 요청 1,000개 조건에서 발급 수량과 발급 내역 수가 모두 100건으로 유지되는 것을 검증했습니다.
 Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
@@ -56,9 +58,10 @@ Redis, `synchronized`는 아직 적용하지 않았습니다.
 
 ## 4. 동시성 실험 설계
 
-쿠폰 발급 도메인은 transaction-only baseline, DB UNIQUE 제약 조건, 쿠폰 재고 제어 비관적 락 실험까지 구현되었습니다.
+쿠폰 발급 도메인은 transaction-only baseline, DB UNIQUE 제약 조건, 쿠폰 재고 제어 비관적 락, 쿠폰 재고 제어 낙관적 락 실험까지 구현되었습니다.
 transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발급 문제가 재현되었고, UNIQUE 제약 조건 적용 후에는 동일 사용자 중복 발급 방지가 검증되었습니다.
 비관적 락 적용 후에는 같은 쿠폰 row의 재고 갱신이 직렬화되어 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
+낙관적 락 적용 후에는 `Coupon.version` 기반 version check로 동시 갱신 충돌을 감지해 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
 상품, 주문 기반 결제 도메인과 쿠폰 사용 실험은 아직 계획 단계입니다.
 
 ### 4.1. 쿠폰 초과 발급
@@ -84,7 +87,7 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 - issuedCouponCountByCoupon = 100
 - finalIssuedQuantity = 100
 
-현재 `@Transactional` 기반 쿠폰 발급 baseline에서는 다음 결과가 관측되었습니다.
+`@Version` 적용 전 `@Transactional` 기반 쿠폰 발급 baseline에서는 다음 결과가 관측되었습니다.
 
 - successCount = 1000
 - failCount = 0
@@ -96,7 +99,9 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 이는 여러 트랜잭션이 같은 쿠폰 재고 상태를 동시에 읽고 발급 가능하다고 판단한 뒤, 각자 발급 내역을 저장한 concurrency failure입니다.
 
 이 결과는 쿠폰 재고 확인, 발급 수량 증가, 발급 내역 저장을 하나의 트랜잭션 안에서 처리하더라도 동시 접근 자체가 직렬화되지는 않는다는 점을 보여줍니다.
-따라서 transaction-only baseline은 문제 재현용 기준선으로 보존하고, 이후 락/조건부 UPDATE/Redis 전략과 비교합니다.
+따라서 transaction-only baseline은 문제 재현용 historical baseline으로 보존하고, 이후 락/조건부 UPDATE/Redis 전략과 비교합니다.
+현재 `Coupon` 엔티티에는 낙관적 락 실험을 위한 `@Version` 필드가 추가되어 같은 transaction-only 경로도 version check 영향을 받습니다.
+그래서 이 overselling 재현 테스트는 현재 활성 테스트가 아니라 `@Disabled` 상태로 보존되어 있으며, 관측값은 `@Version` 적용 전 결과로 문서화합니다.
 
 #### 관측 결과: 비관적 락 적용
 
@@ -125,6 +130,33 @@ transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발�
 쿠폰 row를 `PESSIMISTIC_WRITE`로 조회한 뒤 재고 확인, 발급 수량 증가, 발급 내역 저장을 처리하면 같은 쿠폰에 대한 요청이 직렬화됩니다.
 따라서 100개 요청만 발급에 성공하고 이후 요청은 재고 소진으로 실패합니다.
 이 전략은 쿠폰 재고 초과 발급과 `Coupon.issuedQuantity`/IssuedCoupon record 불일치를 방지하지만, 동일 사용자 중복 발급의 최종 방어는 여전히 DB UNIQUE 제약 조건이 담당합니다.
+
+#### 관측 결과: 낙관적 락 적용
+
+테스트 시나리오:
+
+- 쿠폰 재고: 100
+- 동시 요청 수: 1,000
+- 사용자 조건: 1,000명의 서로 다른 사용자
+- 충돌 관측용 지연: `LOCK_HOLD_MILLIS = 5L`
+
+정합성이 보장된다면 다음 결과가 나와야 합니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+낙관적 락 적용 후 다음 결과가 관측되었습니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+`Coupon` 엔티티에 `@Version` 필드를 추가하고 일반 조회 후 발급 수량을 증가시키면, JPA가 update 시점에 version mismatch를 감지합니다.
+충돌한 요청은 실패하고 커밋된 요청만 발급 내역을 생성하므로, 발급 내역 수와 `Coupon.issuedQuantity`가 모두 100건으로 유지됩니다.
+현재 실험은 retry 없이 충돌 감지와 최종 정합성만 검증합니다.
 
 ### 4.2. 쿠폰 중복 발급
 
@@ -288,7 +320,7 @@ AND balance >= :amount
 
 | 실험 | 주요 문제 | 적용 전략 |
 | --- | --- | --- |
-| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only baseline 재현 완료, pessimistic lock 적용 완료 |
+| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only historical baseline 재현 완료, pessimistic lock/optimistic lock 적용 완료 |
 | 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id) 적용 완료 |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
 | 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock, atomic update 적용 완료 |
@@ -323,8 +355,12 @@ AND balance >= :amount
 - discountAmount
 - totalQuantity
 - issuedQuantity
+- version (`@Version`)
 - createdAt
 - updatedAt
+
+현재 Coupon에는 낙관적 락 충돌 감지를 위한 `@Version` 필드가 있습니다.
+이 필드 추가 이후 transaction-only overselling baseline은 기존과 같은 방식으로 활성 재현하지 않고, `@Version` 적용 전 historical baseline으로 보존합니다.
 
 ### IssuedCoupon
 - id
@@ -345,7 +381,6 @@ AND balance >= :amount
 - updatedAt
 
 ### Coupon 확장 필드
-- version
 - status
 - issueStartAt
 - issueEndAt
@@ -409,7 +444,7 @@ AND balance >= :amount
 ## 8. 향후 개선
 
 1. 쿠폰 발급 전략 비교
-   - 완료된 DB pessimistic lock 결과를 기준으로 optimistic lock, atomic update, Redis atomic counter 방식의 결과와 성능을 비교한다.
+   - 완료된 DB pessimistic lock과 optimistic lock 결과를 기준으로 atomic update, Redis atomic counter 방식의 결과와 성능을 비교한다.
 
 2. 낙관적 락 재시도 전략 추가
    - 현재는 충돌 감지만 검증하며, 이후 retry를 적용했을 때 최종 성공/실패 결과가 어떻게 달라지는지 비교한다.

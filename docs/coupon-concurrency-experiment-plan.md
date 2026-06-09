@@ -6,7 +6,7 @@ This document defines the concurrency experiment roadmap for first-come coupon i
 
 The goal is to reproduce and solve overselling and duplicate issuance problems under concurrent requests. The structure follows the Point domain experiment style: start with a simple transaction-only baseline, observe the failure, then compare multiple consistency strategies.
 
-This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, and pessimistic-lock stock-control experiment have now been implemented, and the observed results are recorded below. Later stock-control strategies remain planned experiments.
+This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, pessimistic-lock stock-control experiment, and optimistic-lock stock-control experiment have now been implemented, and the observed results are recorded below. Later stock-control strategies remain planned experiments.
 
 ## 2. Target Scenario
 
@@ -64,7 +64,7 @@ For the common stock test:
 | Transaction-only Baseline | Reproduce overselling and duplicate issuance | Completed: `@Transactional` alone is not enough under high contention |
 | DB Unique Constraint | Prevent duplicate issuance for the same user and coupon | Completed: database uniqueness is the final duplicate guard |
 | Pessimistic Lock | Serialize coupon row updates | Completed: stock remains consistent with lock wait cost |
-| Optimistic Lock | Detect concurrent version conflicts | Planned: prevents silent lost update, but may fail many requests without retry |
+| Optimistic Lock | Detect concurrent version conflicts | Completed: stock remains consistent by rejecting conflicting updates through `Coupon.version` |
 | Atomic Update | Use conditional database update | Planned: efficient for stock decrement or issued count increment |
 | Redis Counter | Use Redis as a fast front-line stock gate | Planned: efficient traffic control, but DB reconciliation must be considered |
 | Redis Lua Script | Atomically check stock and duplicate state in Redis | Planned: stronger Redis-side atomicity, more operational complexity |
@@ -158,7 +158,12 @@ Observed conclusion:
 - Final database assertions are required because request counters alone can hide inventory-record divergence.
 - A database unique constraint on `(userId, couponId)` is required as the final guard for duplicate issuance.
 
-The duplicate-issuance reproduction test is now disabled in the current test suite because the DB unique constraint intentionally prevents that failure in the current schema. The baseline result is preserved as the pre-constraint observation.
+The baseline reproduction tests are now disabled in the current test suite and preserved for history/docs:
+
+- The duplicate-issuance reproduction test is disabled because the DB unique constraint intentionally prevents that failure in the current schema.
+- The overselling reproduction test is disabled because adding `Coupon.version` for the optimistic-lock experiment changes the transaction-only stock path through JPA version checking.
+
+The baseline results above are historical observations from before those model/schema changes.
 
 ## 6. Strategy 2: DB Unique Constraint
 
@@ -280,9 +285,11 @@ Optimistic lock, atomic update, Redis counter, and Redis Lua experiments should 
 
 ## 8. Strategy 4: Optimistic Lock
 
+Status: Completed.
+
 How it works:
 
-- Add a version field to Coupon.
+- Add a `@Version` field to Coupon.
 - Requests read Coupon without locking.
 - Each transaction tries to update Coupon using the version it read.
 - If another transaction already changed the row, the version check fails.
@@ -292,9 +299,9 @@ Why it can solve overselling:
 
 Optimistic lock prevents silent overwrites of `issuedQuantity`. Conflicting updates are rejected rather than lost.
 
-Why it may not produce 100 success without retry:
+Why retry still matters:
 
-Under high contention, many requests can read the same version. Only one or a few may commit successfully; the others can fail with optimistic locking exceptions. Without retry, success count may be lower than stock.
+Under high contention, many requests can read the same version. Conflicting commits fail with optimistic locking exceptions. In the current test run, enough sequential commits succeeded to exhaust stock, but the phase still does not implement retry. A production-facing first-come issuance flow should define whether failed conflicts are returned to the user or retried.
 
 Advantages:
 
@@ -317,10 +324,33 @@ What should be verified:
 - Final issued quantity does not exceed total quantity.
 - Behavior with and without retry should be documented separately.
 
-Recommended experiment split:
+Observed result:
 
-- First test: optimistic lock without retry, focused on conflict detection.
-- Later test: optimistic lock with bounded retry, focused on reaching stock-limited success count.
+- Test scenario:
+  - Coupon stock: 100
+  - Concurrent requests: 1,000
+  - Users: 1,000 distinct users
+  - Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+- Expected result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+- Observed result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+
+Why the result occurred:
+
+`Coupon.version` makes concurrent updates visible. Requests that try to commit with a stale version fail instead of overwriting another transaction's `issuedQuantity` update.
+Only committed transactions create durable issued coupon records, so the Coupon row and IssuedCoupon records stay aligned.
+
+Current scope:
+
+This phase verifies optimistic-lock conflict detection and final database consistency without retry handling.
+Adding `@Version` affects all Coupon update paths, so the original transaction-only overselling baseline is treated as a historical pre-version result and its test is disabled in the current suite.
 
 ## 9. Strategy 5: Atomic Update
 
@@ -474,7 +504,7 @@ Combined test:
 - Expected behavior: stock is not exceeded and duplicate issuance is not allowed
 
 The first implementation started with separate tests for overselling and duplicate issuance. The transaction-only baseline reproduced both failures.
-The DB unique constraint experiment then verified duplicate issuance prevention. Combined tests remain a later comparison point after each stock-control strategy is evaluated.
+The DB unique constraint experiment then verified duplicate issuance prevention. Pessimistic lock and optimistic lock then verified stock-control behavior for distinct-user issuance. Combined tests remain a later comparison point after each stock-control strategy is evaluated.
 
 ## 13. Suggested Experiment Order
 
@@ -484,13 +514,13 @@ Recommended order:
 2. Transaction-only baseline for duplicate issuance. Completed.
 3. Add database unique constraint for duplicate issuance. Completed.
 4. Pessimistic lock for stock control. Completed.
-5. Optimistic lock for stock control without retry. Planned.
+5. Optimistic lock for stock control without retry. Completed.
 6. Atomic update for stock control. Planned.
 7. Redis counter for traffic gating. Planned.
 8. Redis Lua script for stock and duplicate checks. Planned.
 
 This order keeps the learning path clear. It first shows what breaks, then adds one consistency mechanism at a time.
-Steps 1 through 4 have been completed. The experiment order remains unchanged for the remaining strategy comparisons.
+Steps 1 through 5 have been completed. The experiment order remains unchanged for the remaining strategy comparisons.
 
 ## 14. Expected Portfolio Narrative
 

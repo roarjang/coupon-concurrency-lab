@@ -76,6 +76,8 @@ Not applied yet:
 - Duplicate issuance prevention test using the DB unique constraint
 - Pessimistic lock stock-control experiment
 - Pessimistic lock stock-control concurrency test
+- Optimistic lock stock-control experiment using `Coupon.version`
+- Optimistic lock stock-control concurrency test
 
 The current Coupon implementation keeps the experiment scope focused on coupon issuance, not payment integration.
 
@@ -85,10 +87,10 @@ Completed coupon experiments:
 - Transaction-only baseline for duplicate issuance reproduction
 - DB unique constraint experiment for duplicate issuance prevention
 - Pessimistic lock experiment for coupon stock control
+- Optimistic lock experiment for coupon stock control
 
 Planned coupon experiments:
 
-- Optimistic lock for stock control
 - Atomic update for stock control
 - Redis counter for traffic gating
 - Redis Lua script for stock and duplicate checks
@@ -105,7 +107,7 @@ The Coupon domain follows the same learning pattern:
 - Verify final database state under concurrent requests.
 - Preserve observed results for portfolio explanation.
 
-At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, and stock control with a pessimistic lock. Optimistic lock, atomic update, and Redis-based strategies remain planned comparisons.
+At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, and stock control with pessimistic and optimistic locks. Atomic update and Redis-based strategies remain planned comparisons.
 
 ## Transaction-Only Baseline Result
 
@@ -213,7 +215,7 @@ Expected correct result:
 - issuedCouponCountByCoupon = 100
 - finalIssuedQuantity = 100
 
-Observed result:
+Observed baseline result before adding `Coupon.version`:
 
 - successCount = 1000
 - failCount = 0
@@ -223,6 +225,12 @@ Observed result:
 This result demonstrates overselling and inventory-record mismatch.
 All 1,000 requests created issued coupon records even though the coupon stock was 100.
 The final `issuedQuantity` stayed at 100, so the Coupon row and IssuedCoupon records diverged.
+
+Note:
+
+After adding `@Version` to the Coupon entity for optimistic locking, the transaction-only stock path is also affected by JPA version checking.
+Therefore, this overselling result is preserved as the historical baseline observed before `Coupon.version` was added.
+The corresponding overselling reproduction test is disabled in the current test suite and kept for history/docs.
 
 ## Coupon Transaction-Only Duplicate Issuance Result
 
@@ -304,12 +312,41 @@ Only 100 requests can issue the coupon, and the Coupon inventory value stays con
 This strategy solves stock overselling for one Coupon row under the tested scenario.
 Duplicate issuance prevention is still handled by the DB unique constraint on `(userId, couponId)`.
 
+## Coupon Optimistic Lock Stock-Control Result
+
+The optimistic lock version uses the `@Version` field on Coupon.
+It reads the Coupon row normally and lets JPA detect version conflicts when concurrent transactions try to update the same Coupon row.
+
+Scenario:
+
+- Coupon stock: 100
+- Concurrent requests: 1,000
+- Users: 1,000 distinct users
+- Delay for contention observation: `LOCK_HOLD_MILLIS = 5L`
+
+Expected correct result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+Observed result:
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+
+This result shows that optimistic locking prevents silent stock lost update.
+Conflicting requests fail instead of overwriting `issuedQuantity`, and the final Coupon row stays consistent with IssuedCoupon records.
+This phase verifies conflict detection without retry handling.
+
 ## Planned Domains and Strategies
 
 - Product
 - Order
 - Coupon stock-control strategies:
-  - Optimistic lock
   - Atomic update
   - Redis counter
   - Redis Lua script
