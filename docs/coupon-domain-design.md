@@ -138,10 +138,10 @@ Several strategies will be compared:
 - Pessimistic lock on the Coupon row. Completed for stock control.
 - Optimistic lock using Coupon version. Completed for stock control.
 - Atomic update using a conditional update query. Completed for stock control.
-- Redis counter for front-line traffic control.
+- Redis counter for front-line traffic control. Completed.
 - Redis Lua script for atomic stock and duplicate control.
 
-The first database-centered strategies should update `issuedQuantity` and create `IssuedCoupon` inside a transaction. Redis strategies can be evaluated later as a high-throughput front-line guard, while still persisting final issuance records in the database.
+The first database-centered strategies should update `issuedQuantity` and create `IssuedCoupon` inside a transaction. The Redis Counter strategy has now been evaluated as a high-throughput front-line gate, while still persisting final issuance records in the database.
 
 Observed pessimistic-lock stock-control result:
 
@@ -200,11 +200,11 @@ Assumptions:
 - Pessimistic lock stock-control experiment is implemented and verified.
 - Optimistic lock stock-control experiment is implemented and verified.
 - Atomic update stock-control experiment is implemented and verified.
-- Redis Counter is the next planned stock-control strategy.
+- Redis Counter stock-gate experiment is implemented and verified.
 - Redis Lua Script remains a later planned strategy for Redis-side stock and duplicate checks.
 - Product, Order, and payment coupon usage are planned but not part of the first Coupon issuance phase.
 - PostgreSQL is the main consistency store.
-- Redis is available as a dependency but should be introduced only in later Coupon strategy phases.
+- Redis is configured for the Redis Counter coupon strategy.
 
 Constraints:
 
@@ -256,21 +256,22 @@ Transaction consistency:
 - If IssuedCoupon creation fails, inventory should not be permanently increased.
 - If inventory update fails, IssuedCoupon should not be created.
 
-Redis consistency, when introduced later:
+Redis consistency:
 
 - Redis may accept or reject requests faster than the database.
 - The design must consider what happens if Redis succeeds but DB persistence fails.
 - Compensation or reconciliation may be needed for production-grade designs.
 
-Planned Redis Counter scope:
+Redis Counter result:
 
-- Redis will be used as a front-line stock gate for first-come issuance.
-- The first Redis phase should use distinct users and focus on stock control, matching the database-centered stock tests.
-- Expected scenario: coupon stock 100, concurrent requests 1,000, expected successCount 100 and failCount 900.
+- Redis is used as a front-line stock gate for first-come issuance.
+- The first Redis phase uses distinct users and focuses on stock control, matching the database-centered stock tests.
+- Observed scenario: coupon stock 100, concurrent requests 1,000, successCount 100, failCount 900, issuedCouponCountByCoupon 100, finalIssuedQuantity 100, redisCounterValue 100.
 - PostgreSQL remains the durable source of truth for Coupon and IssuedCoupon records.
 - The DB unique constraint on `(userId, couponId)` remains responsible for duplicate issuance prevention.
 - Redis Counter does not track per-user issuance in this phase.
-- If Redis accepts a request but DB persistence fails, the implementation must either compensate or document the mismatch risk.
+- If Redis accepts a request but DB persistence fails, the implementation compensates by decrementing the Redis counter.
+- The DB persistence step uses the conditional update query instead of `coupon.issue()` because the Coupon entity has `@Version` from the optimistic-lock experiment.
 - Redis Lua Script is the planned follow-up when stock and duplicate checks need to be atomic inside Redis.
 
 ## 10. Potential Concurrency Problems
@@ -312,7 +313,8 @@ The system increments `issuedQuantity` but fails to create the IssuedCoupon reco
 
 Redis and DB mismatch:
 
-Redis may count a request as accepted, but database persistence may later fail. This is not part of the first implementation, but it should be considered when Redis strategies are introduced.
+Redis may count a request as accepted, but database persistence may later fail. The Redis Counter phase compensates by decrementing the Redis counter when database persistence fails after Redis acceptance.
+This keeps the tested result aligned, but it is not the same as one atomic commit boundary across Redis and PostgreSQL.
 
 ## 11. Design Direction
 
@@ -325,4 +327,4 @@ The Coupon domain should follow the same learning pattern as the Point domain:
 5. Apply conditional update for efficient database-side control.
 6. Introduce Redis counter and Lua script strategies for first-come traffic control.
 
-The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The third step has been completed for stock control with a pessimistic lock. The fourth step has been completed for stock control with optimistic locking. The fifth step has been completed for stock control with atomic update. The remaining Redis steps stay in the same experiment order and should be compared against the observed baseline, pessimistic-lock, optimistic-lock, and atomic-update results.
+The first step has been completed for overselling and duplicate issuance. The second step has been completed for duplicate issuance prevention. The third step has been completed for stock control with a pessimistic lock. The fourth step has been completed for stock control with optimistic locking. The fifth step has been completed for stock control with atomic update. The Redis Counter part of the sixth step has also been completed. Redis Lua remains in the same experiment order and should be compared against the observed baseline, pessimistic-lock, optimistic-lock, atomic-update, and Redis-counter results.

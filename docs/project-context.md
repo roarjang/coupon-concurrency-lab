@@ -14,7 +14,7 @@ This is not a typical CRUD project. The main purpose is to demonstrate how data 
 - Spring Boot
 - Spring Data JPA
 - PostgreSQL
-- Redis dependency included, planned for later experiments
+- Redis dependency and local Docker service
 - Gradle
 - Docker Compose
 - JWT Authentication
@@ -59,7 +59,6 @@ The current Point implementation keeps multiple strategies for comparison:
 
 Not applied yet:
 
-- Redis
 - Distributed lock
 - `synchronized`
 
@@ -80,6 +79,8 @@ Not applied yet:
 - Optimistic lock stock-control concurrency test
 - Atomic update stock-control experiment
 - Atomic update stock-control concurrency test
+- Redis Counter stock-gate experiment
+- Redis Counter stock-gate concurrency test
 
 The current Coupon implementation keeps the experiment scope focused on coupon issuance, not payment integration.
 
@@ -91,15 +92,15 @@ Completed coupon experiments:
 - Pessimistic lock experiment for coupon stock control
 - Optimistic lock experiment for coupon stock control
 - Atomic update experiment for coupon stock control
+- Redis Counter experiment for front-line coupon stock gating
 
 Planned coupon experiments:
 
-- Redis counter for traffic gating
 - Redis Lua script for stock and duplicate checks
 
 ## Current Focus
 
-The current focus is still the Coupon issuance domain, now moving from completed database-centered stock-control results to the remaining Redis-based strategy comparisons.
+The current focus is still the Coupon issuance domain, now moving from the completed Redis Counter stock-gate result to the remaining Redis Lua comparison.
 
 The Point domain has completed the baseline, pessimistic lock, optimistic lock, and atomic update comparison.
 The Coupon domain follows the same learning pattern:
@@ -109,16 +110,16 @@ The Coupon domain follows the same learning pattern:
 - Verify final database state under concurrent requests.
 - Preserve observed results for portfolio explanation.
 
-At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, and stock control with pessimistic lock, optimistic lock, and atomic update. The next planned comparison is Redis Counter as a front-line stock gate before database persistence.
+At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, stock control with pessimistic lock, optimistic lock, atomic update, and Redis Counter as a front-line stock gate before database persistence.
 
-Planned Redis Counter scope:
+Redis Counter result:
 
 - Use Redis to accept only the first stock-sized request slots before DB persistence.
-- Test with coupon stock 100 and 1,000 concurrent requests from distinct users.
-- Expect successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, and finalIssuedQuantity = 100.
+- Tested with coupon stock 100 and 1,000 concurrent requests from distinct users.
+- Observed successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100, and redisCounterValue = 100.
 - Keep PostgreSQL as the durable source of truth for Coupon and IssuedCoupon records.
 - Keep duplicate issuance prevention delegated to the DB unique constraint on `(userId, couponId)`.
-- Document or compensate the mismatch risk when Redis accepts a request but DB persistence fails.
+- Compensate the mismatch risk by decrementing the Redis counter when database persistence fails after Redis acceptance.
 
 ## Transaction-Only Baseline Result
 

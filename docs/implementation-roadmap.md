@@ -449,35 +449,41 @@ Because this stock-control test uses different users, `save` is enough for Issue
 
 ## Phase 12. Coupon Traffic Control - Redis Counter
 
-Status: Planned
+Status: Done
 
 Goal:
 
 Use Redis as a fast front-line stock gate before database persistence.
 
-Planned approach:
+Implemented approach:
 
 - Add a Redis-based coupon stock gate as a separate issuance strategy
 - Use an atomic Redis counter operation to reserve only the first stock-sized request slots
 - Reject requests whose Redis counter value exceeds coupon stock before they perform DB persistence
 - Persist accepted requests to PostgreSQL as the durable source of truth
 - Keep the DB UNIQUE constraint on `(userId, couponId)` as the duplicate issuance guard
-- Document whether DB persistence failure after Redis acceptance is only a known limitation or handled with compensation
+- Use the conditional database update for final `Coupon.issuedQuantity` persistence
+- Compensate Redis by decrementing the counter when database persistence fails after Redis acceptance
 
-Planned test scenario:
+Test scenario:
 
 - Coupon stock: 100
 - Concurrent requests: 1,000
 - Users: 1,000 distinct users
 
-Expected behavior:
+Observed result:
 
-- Redis accepted count should not exceed coupon stock.
-- successCount should be 100.
-- failCount should be 900.
-- issuedCouponCountByCoupon should be 100.
-- finalIssuedQuantity should be 100.
-- DB persistence and Redis acceptance must be reconciled or explicitly documented.
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+- redisCounterValue = 100
+
+Conclusion:
+
+Redis Counter works as a front-line stock gate in the tested distinct-user scenario.
+It should be understood as traffic control before database persistence, not as a replacement for PostgreSQL consistency.
+In small local tests, Atomic Update can still be faster because Redis Counter adds one Redis round trip to every request while the database conditional update is already cheap.
 
 Scope limitation:
 

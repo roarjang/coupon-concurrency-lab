@@ -6,7 +6,7 @@ This document defines the concurrency experiment roadmap for first-come coupon i
 
 The goal is to reproduce and solve overselling and duplicate issuance problems under concurrent requests. The structure follows the Point domain experiment style: start with a simple transaction-only baseline, observe the failure, then compare multiple consistency strategies.
 
-This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, pessimistic-lock stock-control experiment, optimistic-lock stock-control experiment, and atomic-update stock-control experiment have now been implemented, and the observed results are recorded below. Later Redis-based stock-control strategies remain planned experiments.
+This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, pessimistic-lock stock-control experiment, optimistic-lock stock-control experiment, atomic-update stock-control experiment, and Redis-counter stock-gate experiment have now been implemented, and the observed results are recorded below. Redis Lua remains a planned experiment.
 
 ## 2. Target Scenario
 
@@ -66,7 +66,7 @@ For the common stock test:
 | Pessimistic Lock | Serialize coupon row updates | Completed: stock remains consistent with lock wait cost |
 | Optimistic Lock | Detect concurrent version conflicts | Completed: stock remains consistent by rejecting conflicting updates through `Coupon.version` |
 | Atomic Update | Use conditional database update | Completed: stock remains consistent by letting PostgreSQL atomically apply the stock condition and increment |
-| Redis Counter | Use Redis as a fast front-line stock gate | Planned: efficient traffic control, but DB reconciliation must be considered |
+| Redis Counter | Use Redis as a fast front-line stock gate | Completed: Redis limits request slots before database persistence, while PostgreSQL remains the source of truth |
 | Redis Lua Script | Atomically check stock and duplicate state in Redis | Planned: stronger Redis-side atomicity, more operational complexity |
 
 ## 5. Strategy 1: Transaction-only Baseline
@@ -431,7 +431,7 @@ The stock-control test uses different users, so duplicate-key contention is not 
 
 ## 10. Strategy 6: Redis Counter
 
-Status: Planned.
+Status: Completed.
 
 How it works:
 
@@ -472,7 +472,7 @@ What should be verified:
 - Requests after stock exhaustion are rejected quickly.
 - Duplicate requests are not accepted if duplicate control is included.
 
-Planned experiment scope:
+Experiment scope:
 
 - Test scenario:
   - Coupon stock: 100
@@ -493,11 +493,50 @@ Planned experiment scope:
   - finalIssuedQuantity = 100
   - Redis accepted count = 100
 
-Initial implementation direction:
+Implemented approach:
 
 The first Redis Counter phase should focus on stock gating for distinct-user issuance, not Redis-side duplicate tracking.
-The service can use Redis to decide whether a request is allowed to reach DB persistence, while PostgreSQL remains responsible for durable state.
-If DB persistence fails after Redis accepts a request, the phase should either document the mismatch risk or add an explicit compensation path. That decision should be recorded with the observed result.
+The service uses Redis to decide whether a request is allowed to reach DB persistence, while PostgreSQL remains responsible for durable state.
+The Redis key stores a coupon-specific counter using the form `coupon:issue:count:{couponId}`.
+Requests whose Redis counter value is greater than coupon stock are rejected before database persistence.
+
+Database persistence still uses PostgreSQL. The implementation uses the existing conditional update query to increase `Coupon.issuedQuantity` and then saves `IssuedCoupon`.
+This avoids the `Coupon.version` conflicts that would occur if the Redis phase reused the entity read-modify-write path through `coupon.issue()`.
+
+If DB persistence fails after Redis accepts a request, the Redis counter is decremented as compensation.
+This compensation keeps the observed experiment state aligned, but it is not the same as one atomic transaction across Redis and PostgreSQL.
+
+Observed result:
+
+- Test scenario:
+  - Coupon stock: 100
+  - Concurrent requests: 1,000
+  - Users: 1,000 distinct users
+- Expected result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+  - Redis accepted count = 100
+- Observed result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+  - redisCounterValue = 100
+
+Why the result occurred:
+
+Redis `INCR` gives each request a unique counter value. Only the first 100 counter values are allowed to continue to database persistence.
+PostgreSQL then applies the final stock update through a conditional update and persists the issued coupon record.
+Final correctness is verified from database state, not from Redis alone.
+
+Comparison with Atomic Update:
+
+Atomic Update sends every request to PostgreSQL and lets the database decide success or failure through the update count.
+Redis Counter plus Atomic Update adds a Redis gate before that database persistence step, so requests beyond stock can fail before the write path.
+In a small local test, Redis Counter may not be faster because every request pays an additional Redis round trip and the atomic database update is already cheap.
+The main value of Redis Counter is therefore traffic gating under larger request spikes, not replacing PostgreSQL consistency.
 
 Duplicate issuance scope:
 
@@ -590,11 +629,11 @@ Recommended order:
 4. Pessimistic lock for stock control. Completed.
 5. Optimistic lock for stock control without retry. Completed.
 6. Atomic update for stock control. Completed.
-7. Redis counter for traffic gating. Planned.
+7. Redis counter for traffic gating. Completed.
 8. Redis Lua script for stock and duplicate checks. Planned.
 
 This order keeps the learning path clear. It first shows what breaks, then adds one consistency mechanism at a time.
-Steps 1 through 6 have been completed. The experiment order remains unchanged for the remaining Redis-based strategy comparisons.
+Steps 1 through 7 have been completed. Redis Lua remains the next Redis-based strategy comparison.
 
 ## 14. Expected Portfolio Narrative
 
