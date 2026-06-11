@@ -78,12 +78,25 @@ Optimistic Lock은 stale update를 감지하고 거부하지만, retry 없이 �
 
 ## 문서 가이드
 
+### 주요 문서
+
 | 문서 | 내용 |
 | --- | --- |
+| [Architecture](docs/architecture.md) | 현재 구현된 Point, Coupon, PostgreSQL, Redis, 테스트 구조 |
+| [Concurrency Experiment Runbook](docs/runbook.md) | 로컬 환경에서 동시성 실험을 재현하고 검증하는 절차 |
 | [Point Concurrency Strategy Comparison](docs/point-concurrency-strategy-comparison.md) | 포인트 차감 lost update 재현과 pessimistic lock, optimistic lock, atomic update 비교 |
 | [Coupon Concurrency Strategy Comparison](docs/coupon-concurrency-strategy-comparison.md) | 쿠폰 overselling, duplicate issuance, DB/Redis 전략 비교와 trade-off 정리 |
 | [Coupon Domain Design](docs/coupon-domain-design.md) | Coupon, IssuedCoupon 모델링과 정합성 제약 조건 |
-| [Implementation Roadmap](docs/implementation-roadmap.md) | 구현 완료 단계와 이후 Product/Order/Payment 계획 |
+| [Redis Consistency Boundary](docs/redis-consistency-boundary.md) | Redis front-line gate와 PostgreSQL source of truth 사이의 정합성 경계 |
+
+### 참고 문서 (히스토리)
+
+| 문서 | 내용 |
+| --- | --- |
+| [Implementation Roadmap](docs/history/implementation-roadmap.md) | 구현 단계와 phase별 의사결정 기록 |
+| [Project Context](docs/history/project-context.md) | 초기 프로젝트 맥락과 working-state 기록 |
+| [Point Experiment Plan](docs/history/concurrency-experiment-plan.md) | Point 동시성 실험의 초기 계획과 기준 시나리오 |
+| [Coupon Experiment Plan](docs/history/coupon-concurrency-experiment-plan.md) | Coupon 동시성 실험의 초기 계획과 구현 진행 기록 |
 
 ## 다음 작업
 

@@ -4,7 +4,7 @@
 >
 > This document captures earlier project context and working-state notes.
 > It remains useful for understanding project evolution and experiment rationale.
-> For current v1 documentation, start with [Architecture](architecture.md), [Runbook](runbook.md), [Point Concurrency Strategy Comparison](point-concurrency-strategy-comparison.md), [Coupon Concurrency Strategy Comparison](coupon-concurrency-strategy-comparison.md), [Coupon Domain Design](coupon-domain-design.md), and [Redis Consistency Boundary](redis-consistency-boundary.md).
+> For current v1 documentation, start with [Architecture](../architecture.md), [Runbook](../runbook.md), [Point Concurrency Strategy Comparison](../point-concurrency-strategy-comparison.md), [Coupon Concurrency Strategy Comparison](../coupon-concurrency-strategy-comparison.md), [Coupon Domain Design](../coupon-domain-design.md), and [Redis Consistency Boundary](../redis-consistency-boundary.md).
 
 ## Project Goal
 

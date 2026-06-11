@@ -28,10 +28,12 @@ Important files and directories:
 | Path | Purpose |
 | --- | --- |
 | `README.md` | Project summary and documentation entry point |
+| `docs/architecture.md` | Current implemented system architecture |
 | `docs/point-concurrency-strategy-comparison.md` | Detailed Point concurrency experiment results and trade-offs |
 | `docs/coupon-concurrency-strategy-comparison.md` | Detailed Coupon concurrency experiment results and trade-offs |
 | `docs/coupon-domain-design.md` | Coupon and IssuedCoupon domain model and consistency constraints |
-| `docs/implementation-roadmap.md` | Completed and planned implementation phases |
+| `docs/redis-consistency-boundary.md` | Redis and PostgreSQL consistency boundary for coupon issuance |
+| `docs/history/` | Historical planning and development records |
 | `docker-compose.yml` | Local PostgreSQL and Redis services |
 | `src/main/resources/application.yml` | Main Spring Boot configuration used by local tests |
 | `src/test/java/com/roar/coupon/domain/point/service/PointServiceConcurrencyTest.java` | Point concurrency tests |
@@ -180,8 +182,8 @@ These historical results are preserved in:
 
 - `docs/point-concurrency-strategy-comparison.md`
 - `docs/coupon-concurrency-strategy-comparison.md`
-- `docs/coupon-concurrency-experiment-plan.md`
-- `docs/implementation-roadmap.md`
+- `docs/history/coupon-concurrency-experiment-plan.md`
+- `docs/history/implementation-roadmap.md`
 
 The active test suite focuses on verifying the current implemented strategies and final consistency invariants.
 
@@ -314,4 +316,4 @@ DEL coupon:issue:users:{couponId}
 - [Point Concurrency Strategy Comparison](point-concurrency-strategy-comparison.md)
 - [Coupon Concurrency Strategy Comparison](coupon-concurrency-strategy-comparison.md)
 - [Coupon Domain Design](coupon-domain-design.md)
-- [Implementation Roadmap](implementation-roadmap.md)
+- [Implementation Roadmap](history/implementation-roadmap.md)

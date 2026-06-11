@@ -3,7 +3,7 @@
 > **Historical reference**
 >
 > This roadmap preserves the implementation sequence and phase-level decisions used while the project was built.
-> For current architecture, reproduction steps, and authoritative experiment results, start with [Architecture](architecture.md), [Runbook](runbook.md), [Point Concurrency Strategy Comparison](point-concurrency-strategy-comparison.md), and [Coupon Concurrency Strategy Comparison](coupon-concurrency-strategy-comparison.md).
+> For current architecture, reproduction steps, and authoritative experiment results, start with [Architecture](../architecture.md), [Runbook](../runbook.md), [Point Concurrency Strategy Comparison](../point-concurrency-strategy-comparison.md), and [Coupon Concurrency Strategy Comparison](../coupon-concurrency-strategy-comparison.md).
 
 ## Phase 1. User and Authentication
 

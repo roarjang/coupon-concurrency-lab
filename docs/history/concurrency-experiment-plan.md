@@ -3,7 +3,7 @@
 > **Historical reference**
 >
 > This document preserves the original Point concurrency experiment plan.
-> Current Point results and local verification steps are documented in [Point Concurrency Strategy Comparison](point-concurrency-strategy-comparison.md) and [Runbook](runbook.md).
+> Current Point results and local verification steps are documented in [Point Concurrency Strategy Comparison](../point-concurrency-strategy-comparison.md) and [Runbook](../runbook.md).
 
 ## Purpose
 
