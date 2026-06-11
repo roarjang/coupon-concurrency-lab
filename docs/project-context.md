@@ -81,6 +81,9 @@ Not applied yet:
 - Atomic update stock-control concurrency test
 - Redis Counter stock-gate experiment
 - Redis Counter stock-gate concurrency test
+- Redis Lua stock-and-duplicate gate experiment
+- Redis Lua stock-control concurrency test
+- Redis Lua duplicate-control concurrency test
 
 The current Coupon implementation keeps the experiment scope focused on coupon issuance, not payment integration.
 
@@ -93,14 +96,11 @@ Completed coupon experiments:
 - Optimistic lock experiment for coupon stock control
 - Atomic update experiment for coupon stock control
 - Redis Counter experiment for front-line coupon stock gating
-
-Planned coupon experiments:
-
-- Redis Lua script for stock and duplicate checks
+- Redis Lua experiment for front-line stock and duplicate gating
 
 ## Current Focus
 
-The current focus is still the Coupon issuance domain, now moving from the completed Redis Counter stock-gate result to the remaining Redis Lua comparison.
+The current focus is still the Coupon issuance domain, now documenting the completed Redis Lua comparison before moving to the remaining product, order, payment, and coupon-usage phases.
 
 The Point domain has completed the baseline, pessimistic lock, optimistic lock, and atomic update comparison.
 The Coupon domain follows the same learning pattern:
@@ -110,7 +110,7 @@ The Coupon domain follows the same learning pattern:
 - Verify final database state under concurrent requests.
 - Preserve observed results for portfolio explanation.
 
-At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, stock control with pessimistic lock, optimistic lock, atomic update, and Redis Counter as a front-line stock gate before database persistence.
+At this point, Coupon has completed failure reproduction, duplicate prevention with a DB unique constraint, stock control with pessimistic lock, optimistic lock, atomic update, Redis Counter as a front-line stock gate, and Redis Lua as a front-line stock-and-duplicate gate before database persistence.
 
 Redis Counter result:
 
@@ -120,6 +120,18 @@ Redis Counter result:
 - Keep PostgreSQL as the durable source of truth for Coupon and IssuedCoupon records.
 - Keep duplicate issuance prevention delegated to the DB unique constraint on `(userId, couponId)`.
 - Compensate the mismatch risk by decrementing the Redis counter when database persistence fails after Redis acceptance.
+
+Redis Lua result:
+
+- Use Redis Lua to atomically check stock and duplicate state before DB persistence.
+- Use a Redis count key for accepted stock slots and a Redis user set key for duplicate tracking.
+- Tested stock control with coupon stock 100 and 1,000 concurrent requests from distinct users.
+- Observed stock result: successCount = 100, failCount = 900, issuedCouponCountByCoupon = 100, finalIssuedQuantity = 100, redisCounterValue = 100, redisIssuedUserCount = 100.
+- Tested duplicate control with coupon stock 1,000 and 100 concurrent requests from the same user.
+- Observed duplicate result: successCount = 1, failCount = 99, issuedCouponCountByCoupon = 1, issuedCouponCountByUserAndCoupon = 1, finalIssuedQuantity = 1, redisCountValue = 1, redisIssuedUserCount = 1.
+- Keep PostgreSQL as the durable source of truth for Coupon and IssuedCoupon records.
+- Keep the DB unique constraint on `(userId, couponId)` as the final duplicate issuance guard.
+- Compensate the mismatch risk by decrementing the Redis counter and removing the user id from the Redis issued-user set when database persistence fails after Redis acceptance.
 
 ## Transaction-Only Baseline Result
 
@@ -395,9 +407,8 @@ Because this stock-control test uses different users, IssuedCoupon `save` is eno
 
 - Product
 - Order
-- Coupon stock-control strategies:
-  - Redis counter
-  - Redis Lua script
+- Coupon usage consistency experiments
+- Payment integration experiments
 
 ## Design Philosophy
 

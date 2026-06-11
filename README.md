@@ -44,11 +44,14 @@ Redis 원자 연산과 DB 트랜잭션/락을 사용해 데이터 정합성을 �
 21. 쿠폰 재고 제어 조건부 UPDATE 동시성 테스트
 22. 쿠폰 재고 제어 Redis Counter 실험
 23. 쿠폰 재고 제어 Redis Counter 동시성 테스트
+24. 쿠폰 재고 및 중복 발급 제어 Redis Lua Script 실험
+25. 쿠폰 재고 및 중복 발급 제어 Redis Lua Script 동시성 테스트
 
 현재 Point 구현은 `@Transactional` 기반 read-modify-write baseline, 비관적 락 적용 버전, 낙관적 락 적용 버전, 조건부 UPDATE 적용 버전을 비교합니다.
 현재 Coupon 구현은 `@Transactional` 기반 transaction-only baseline으로 초과 발급과 동일 사용자 중복 발급을 재현한 뒤, 동일 사용자 중복 발급 문제는 DB UNIQUE 제약 조건으로 방지했습니다.
-쿠폰 재고 제어는 비관적 락, 낙관적 락, 조건부 UPDATE, Redis Counter를 적용해 stock 100, 동시 요청 1,000개 조건에서 발급 수량과 발급 내역 수가 모두 100건으로 유지되는 것을 검증했습니다.
-Redis Lua Script, `synchronized`는 아직 적용하지 않았습니다.
+쿠폰 재고 제어는 비관적 락, 낙관적 락, 조건부 UPDATE, Redis Counter, Redis Lua Script를 적용해 stock 100, 동시 요청 1,000개 조건에서 발급 수량과 발급 내역 수가 모두 100건으로 유지되는 것을 검증했습니다.
+Redis Lua Script 단계에서는 Redis 안에서 재고 확인과 동일 사용자 중복 확인을 하나의 Lua script로 원자적으로 처리해, 동일 사용자 100개 동시 요청 조건에서도 최종 발급 내역이 1건으로 유지되는 것을 검증했습니다.
+`synchronized`는 아직 적용하지 않았습니다.
 
 ### 3.2 계획된 기능
 
@@ -62,12 +65,13 @@ Redis Lua Script, `synchronized`는 아직 적용하지 않았습니다.
 
 ## 4. 동시성 실험 설계
 
-쿠폰 발급 도메인은 transaction-only baseline, DB UNIQUE 제약 조건, 쿠폰 재고 제어 비관적 락, 쿠폰 재고 제어 낙관적 락, 쿠폰 재고 제어 조건부 UPDATE, Redis Counter 실험까지 구현되었습니다.
+쿠폰 발급 도메인은 transaction-only baseline, DB UNIQUE 제약 조건, 쿠폰 재고 제어 비관적 락, 쿠폰 재고 제어 낙관적 락, 쿠폰 재고 제어 조건부 UPDATE, Redis Counter, Redis Lua Script 실험까지 구현되었습니다.
 transaction-only baseline에서는 초과 발급과 동일 사용자 중복 발급 문제가 재현되었고, UNIQUE 제약 조건 적용 후에는 동일 사용자 중복 발급 방지가 검증되었습니다.
 비관적 락 적용 후에는 같은 쿠폰 row의 재고 갱신이 직렬화되어 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
 낙관적 락 적용 후에는 `Coupon.version` 기반 version check로 동시 갱신 충돌을 감지해 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
 조건부 UPDATE 적용 후에는 PostgreSQL이 `issuedQuantity < totalQuantity` 조건 확인과 발급 수량 증가를 하나의 UPDATE로 처리해 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
 Redis Counter 적용 후에는 Redis `INCR`로 재고 수량만큼의 요청 슬롯만 DB 저장 단계로 통과시키고, PostgreSQL 조건부 UPDATE로 최종 발급 수량을 반영해 초과 발급과 발급 수량 불일치가 방지되는 것을 확인했습니다.
+Redis Lua Script 적용 후에는 Redis Lua script가 재고 상태와 동일 사용자 발급 상태를 Redis 안에서 함께 확인해, 초과 발급과 동일 사용자 중복 발급을 모두 DB 이전 단계에서 제어하는 것을 확인했습니다.
 상품, 주문 기반 결제 도메인과 쿠폰 사용 실험은 아직 계획 단계입니다.
 
 ### 4.1. 쿠폰 초과 발급
@@ -236,6 +240,33 @@ Atomic Update 자체가 짧은 DB 조건부 UPDATE이고, Redis Counter는 모�
 Redis에서 발급 가능으로 처리된 뒤 DB 저장이 실패하는 경우에는 Redis counter를 감소시키는 보상 처리를 적용했습니다.
 다만 이는 Redis와 PostgreSQL을 하나의 원자적 트랜잭션으로 묶는 것은 아니므로, 운영 환경에서는 재조정과 관측 가능성 설계가 추가로 필요합니다.
 
+#### 관측 결과: Redis Lua Script 적용 - 재고 제어
+
+Redis Lua Script는 Redis 안에서 재고 확인과 동일 사용자 중복 확인을 하나의 Lua script로 원자적으로 처리합니다.
+Redis Counter가 재고 slot만 제한했던 것과 달리, Redis Lua는 `coupon:issue:count:{couponId}` count key와 `coupon:issue:users:{couponId}` issued-user set key를 함께 사용합니다.
+
+테스트 시나리오:
+
+- 쿠폰 재고: 100
+- 동시 요청 수: 1,000
+- 사용자 조건: 1,000명의 서로 다른 사용자
+
+Redis Lua 적용 후 다음 결과가 관측되었습니다.
+
+- successCount = 100
+- failCount = 900
+- issuedCouponCountByCoupon = 100
+- finalIssuedQuantity = 100
+- redisCounterValue = 100
+- redisIssuedUserCount = 100
+
+Redis Lua script는 중복 발급 여부를 먼저 확인하고, 재고가 남아 있는지 확인한 뒤, 두 조건을 모두 만족하는 경우에만 Redis count 증가와 user set 등록을 수행합니다.
+따라서 실패 케이스에서는 Redis에 부분 예약 상태가 남지 않습니다.
+
+Redis에서 발급 가능으로 처리된 뒤 PostgreSQL 저장이 실패하는 경우에는 Redis count를 감소시키고 user set에서 userId를 제거하는 보상 처리를 적용했습니다.
+다만 Redis Lua의 원자성은 Redis 내부에만 적용됩니다.
+Redis와 PostgreSQL은 여전히 하나의 원자적 커밋 경계를 공유하지 않으므로, PostgreSQL은 Coupon과 IssuedCoupon의 최종 저장소로 유지하고 DB UNIQUE(user_id, coupon_id) 제약 조건도 최종 중복 방어선으로 유지합니다.
+
 ### 4.2. 쿠폰 중복 발급
 
 - 조건: 동일 사용자가 같은 쿠폰에 대해 동시에 여러 번 발급 요청
@@ -294,6 +325,28 @@ UNIQUE 제약 조건 적용 후 다음 결과가 관측되었습니다.
 
 여러 트랜잭션이 동시에 애플리케이션 레벨 중복 조회를 통과하더라도, 데이터베이스가 동일한 `(user_id, coupon_id)` 조합의 두 번째 insert를 거부합니다.
 따라서 하나의 요청만 발급에 성공하고 나머지 요청은 중복 키 위반으로 실패하여, 최종 발급 내역은 1건으로 유지됩니다.
+
+#### 관측 결과: Redis Lua Script 적용 - 중복 발급 제어
+
+테스트 시나리오:
+
+- 쿠폰 재고: 1,000
+- 동시 요청 수: 100
+- 사용자 조건: 동일 사용자 1명이 같은 쿠폰에 대해 100번 동시 요청
+
+Redis Lua 적용 후 다음 결과가 관측되었습니다.
+
+- successCount = 1
+- failCount = 99
+- issuedCouponCountByCoupon = 1
+- issuedCouponCountByUserAndCoupon = 1
+- finalIssuedQuantity = 1
+- redisCountValue = 1
+- redisIssuedUserCount = 1
+
+Redis Lua는 동일 사용자 발급 여부를 Redis issued-user set에서 먼저 확인합니다.
+첫 번째 요청만 Redis gate를 통과해 PostgreSQL 저장 단계로 진입하고, 나머지 99개 중복 요청은 Redis에서 바로 거부됩니다.
+따라서 DB UNIQUE 제약 조건은 여전히 최종 방어선으로 남지만, 중복 요청 대부분은 DB write path에 도달하기 전에 차단됩니다.
 
 ### 4.3. 쿠폰 중복 사용
 
@@ -399,8 +452,8 @@ AND balance >= :amount
 
 | 실험 | 주요 문제 | 적용 전략 |
 | --- | --- | --- |
-| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only historical baseline 재현 완료, pessimistic lock/optimistic lock/atomic update/Redis Counter 적용 완료 |
-| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id) 적용 완료 |
+| 쿠폰 초과 발급 | 재고보다 많은 쿠폰 발급 | transaction-only historical baseline 재현 완료, pessimistic lock/optimistic lock/atomic update/Redis Counter/Redis Lua 적용 완료 |
+| 쿠폰 중복 발급 | 동일 사용자 중복 발급 | transaction-only baseline 재현 완료, UNIQUE(user_id, coupon_id)/Redis Lua 적용 완료 |
 | 쿠폰 중복 사용 | 동일 발급 쿠폰의 다중 결제 사용 | row lock 또는 conditional update (계획) |
 | 포인트 lost update | 동시 차감으로 인한 lost update | pessimistic lock, optimistic lock, atomic update 적용 완료 |
 
@@ -523,15 +576,18 @@ AND balance >= :amount
 ## 8. 향후 개선
 
 1. 쿠폰 발급 전략 비교
-   - 완료된 DB pessimistic lock, optimistic lock, atomic update, Redis Counter 결과를 기준으로 전략별 정합성, DB 부하, 운영 복잡도를 비교한다.
+   - 완료된 DB pessimistic lock, optimistic lock, atomic update, Redis Counter, Redis Lua 결과를 기준으로 전략별 정합성, DB 부하, 운영 복잡도를 비교한다.
    - Redis Counter 실험은 쿠폰 재고 100개, 동시 요청 1,000개, 서로 다른 사용자 조건에서 successCount 100, failCount 900, issuedCouponCountByCoupon 100, finalIssuedQuantity 100, redisCounterValue 100을 확인했다.
    - Redis Counter는 재고 gate 역할만 담당하며, 동일 사용자 중복 발급 방지는 계속 `UNIQUE(user_id, coupon_id)` 제약 조건이 담당한다.
    - Redis에서 발급 가능으로 처리된 뒤 DB 저장이 실패하는 경우에는 Redis counter 감소로 보상한다.
-   - 다음 Redis 단계는 Redis Lua Script로 재고와 중복 발급 상태를 Redis 안에서 함께 원자적으로 확인하는 것이다.
+   - Redis Lua Script 실험은 재고와 중복 발급 상태를 Redis 안에서 함께 원자적으로 확인한다.
+   - Redis Lua Script 실험은 쿠폰 재고 100개, 동시 요청 1,000개, 서로 다른 사용자 조건에서 successCount 100, failCount 900, issuedCouponCountByCoupon 100, finalIssuedQuantity 100, redisCounterValue 100, redisIssuedUserCount 100을 확인했다.
+   - Redis Lua Script 실험은 동일 사용자 100개 동시 요청 조건에서 successCount 1, failCount 99, issuedCouponCountByUserAndCoupon 1, redisCountValue 1, redisIssuedUserCount 1을 확인했다.
 
 2. 낙관적 락 재시도 전략 추가
    - 현재는 충돌 감지만 검증하며, 이후 retry를 적용했을 때 최종 성공/실패 결과가 어떻게 달라지는지 비교한다.
 
 3. Redis와 DB 불일치 보정
-   - Redis Counter 단계에는 counter 감소 보상을 적용했지만, Redis와 PostgreSQL이 하나의 원자적 커밋 경계를 공유하는 것은 아니다.
+   - Redis Counter 단계에는 counter 감소 보상을 적용했고, Redis Lua 단계에는 counter 감소와 issued-user set 제거 보상을 적용했다.
+   - Redis와 PostgreSQL이 하나의 원자적 커밋 경계를 공유하는 것은 아니다.
    - 운영 환경을 가정한 재시도, 재조정, 모니터링 전략을 추가로 설계한다.

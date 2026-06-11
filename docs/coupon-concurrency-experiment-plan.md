@@ -6,7 +6,7 @@ This document defines the concurrency experiment roadmap for first-come coupon i
 
 The goal is to reproduce and solve overselling and duplicate issuance problems under concurrent requests. The structure follows the Point domain experiment style: start with a simple transaction-only baseline, observe the failure, then compare multiple consistency strategies.
 
-This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, pessimistic-lock stock-control experiment, optimistic-lock stock-control experiment, atomic-update stock-control experiment, and Redis-counter stock-gate experiment have now been implemented, and the observed results are recorded below. Redis Lua remains a planned experiment.
+This document started as a design proposal. The transaction-only coupon baseline, DB unique constraint duplicate-prevention experiment, pessimistic-lock stock-control experiment, optimistic-lock stock-control experiment, atomic-update stock-control experiment, Redis-counter stock-gate experiment, and Redis Lua stock-and-duplicate gate experiment have now been implemented, and the observed results are recorded below.
 
 ## 2. Target Scenario
 
@@ -67,7 +67,7 @@ For the common stock test:
 | Optimistic Lock | Detect concurrent version conflicts | Completed: stock remains consistent by rejecting conflicting updates through `Coupon.version` |
 | Atomic Update | Use conditional database update | Completed: stock remains consistent by letting PostgreSQL atomically apply the stock condition and increment |
 | Redis Counter | Use Redis as a fast front-line stock gate | Completed: Redis limits request slots before database persistence, while PostgreSQL remains the source of truth |
-| Redis Lua Script | Atomically check stock and duplicate state in Redis | Planned: stronger Redis-side atomicity, more operational complexity |
+| Redis Lua Script | Atomically check stock and duplicate state in Redis | Completed: Redis atomically rejects sold-out and duplicate requests before database persistence |
 
 ## 5. Strategy 1: Transaction-only Baseline
 
@@ -541,14 +541,16 @@ The main value of Redis Counter is therefore traffic gating under larger request
 Duplicate issuance scope:
 
 Redis Counter alone does not solve duplicate issuance. It only limits the number of accepted stock slots.
-Same-user duplicate requests still require the DB unique constraint on `(userId, couponId)` unless Redis user tracking is added in a later strategy.
-Redis Lua Script is the planned follow-up for atomically checking stock and duplicate state together in Redis.
+Same-user duplicate requests still require the DB unique constraint on `(userId, couponId)` unless Redis user tracking is added.
+The Redis Lua Script phase adds that Redis-side user tracking and atomically checks stock and duplicate state together.
 
 Recommended role:
 
 Redis Counter should be treated as a front-line traffic control strategy, not the only source of truth, unless the design explicitly handles reconciliation.
 
 ## 11. Strategy 7: Redis Lua Script
+
+Status: Completed.
 
 How it works:
 
@@ -561,9 +563,19 @@ The script can check:
 - Whether to mark the user as issued.
 - Whether to increment the issued count.
 
+Implemented approach:
+
+- Use a coupon-specific Redis count key: `coupon:issue:count:{couponId}`.
+- Use a coupon-specific Redis user set key: `coupon:issue:users:{couponId}`.
+- Execute one Redis Lua script before database persistence.
+- Return `1` when Redis accepts the request, `-1` when stock is exhausted, and `-2` when the same user already exists in the Redis issued-user set.
+- On Redis acceptance, persist the issuance in PostgreSQL using the existing conditional stock update and `IssuedCoupon` insert.
+- If database persistence fails after Redis acceptance, compensate Redis by decrementing the count key and removing the user id from the issued-user set.
+
 Why it can solve overselling and duplicate issuance in Redis:
 
 The check and update happen atomically inside Redis. No other Redis command can interleave while the script is executing.
+The script checks duplicate state first, checks stock second, and writes Redis reservation state only after both checks pass. Failed Redis-side requests therefore do not leave partial Redis state behind.
 
 Advantages:
 
@@ -586,6 +598,69 @@ What should be verified:
 - DB persistence matches Redis accepted users.
 - Failure after Redis success is handled or explicitly documented.
 - Reconciliation strategy is clear.
+
+Observed stock-control result:
+
+- Test scenario:
+  - Coupon stock: 100
+  - Concurrent requests: 1,000
+  - Users: 1,000 distinct users
+- Expected result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+  - redisCounterValue = 100
+  - redisIssuedUserCount = 100
+- Observed result:
+  - successCount = 100
+  - failCount = 900
+  - issuedCouponCountByCoupon = 100
+  - finalIssuedQuantity = 100
+  - redisCounterValue = 100
+  - redisIssuedUserCount = 100
+
+Observed duplicate-control result:
+
+- Test scenario:
+  - Coupon stock: 1,000
+  - Concurrent requests: 100
+  - Users: same user repeated 100 times for the same coupon
+- Expected result:
+  - successCount = 1
+  - failCount = 99
+  - issuedCouponCountByCoupon = 1
+  - issuedCouponCountByUserAndCoupon = 1
+  - finalIssuedQuantity = 1
+  - redisCountValue = 1
+  - redisIssuedUserCount = 1
+- Observed result:
+  - successCount = 1
+  - failCount = 99
+  - issuedCouponCountByCoupon = 1
+  - issuedCouponCountByUserAndCoupon = 1
+  - finalIssuedQuantity = 1
+  - redisCountValue = 1
+  - redisIssuedUserCount = 1
+
+Why the result occurred:
+
+Redis Lua checks stock and user duplicate state as one Redis-side atomic operation.
+In the stock-control test, only the first 100 distinct users were accepted by Redis and allowed to reach PostgreSQL persistence.
+In the duplicate-control test, the first request from the repeated user was accepted, and the remaining 99 requests were rejected by Redis before reaching the database write path.
+
+Comparison with Redis Counter:
+
+Redis Counter limits accepted stock slots but does not know which users have already been accepted.
+Redis Lua adds a Redis issued-user set, so it can reject duplicate requests before the database unique constraint is reached.
+The database unique constraint remains the final duplicate guard, but Redis Lua reduces duplicate-request pressure on the database.
+
+Consistency limitation:
+
+Redis Lua atomicity is limited to Redis.
+Redis and PostgreSQL are still separate systems, so a Redis-accepted request can fail during database persistence.
+The implemented compensation restores Redis state by decrementing the count key and removing the user id from the issued-user set, but this is not the same as one atomic transaction across Redis and PostgreSQL.
+PostgreSQL remains the durable source of truth for Coupon and IssuedCoupon records.
 
 Recommended role:
 
@@ -630,10 +705,10 @@ Recommended order:
 5. Optimistic lock for stock control without retry. Completed.
 6. Atomic update for stock control. Completed.
 7. Redis counter for traffic gating. Completed.
-8. Redis Lua script for stock and duplicate checks. Planned.
+8. Redis Lua script for stock and duplicate checks. Completed.
 
 This order keeps the learning path clear. It first shows what breaks, then adds one consistency mechanism at a time.
-Steps 1 through 7 have been completed. Redis Lua remains the next Redis-based strategy comparison.
+Steps 1 through 8 have been completed. Redis Lua is now the completed Redis-based strategy that combines stock gating and duplicate gating before database persistence.
 
 ## 14. Expected Portfolio Narrative
 
