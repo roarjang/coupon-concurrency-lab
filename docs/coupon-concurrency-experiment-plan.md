@@ -1,5 +1,10 @@
 # Coupon Concurrency Experiment Plan
 
+> **Historical reference**
+>
+> This document preserves the original Coupon concurrency experiment plan and the implementation notes accumulated as each strategy was completed.
+> For current Coupon results, domain rules, Redis/PostgreSQL consistency boundaries, and local verification steps, use [Coupon Concurrency Strategy Comparison](coupon-concurrency-strategy-comparison.md), [Coupon Domain Design](coupon-domain-design.md), [Redis Consistency Boundary](redis-consistency-boundary.md), and [Runbook](runbook.md).
+
 ## 1. Purpose
 
 This document defines the concurrency experiment roadmap for first-come coupon issuance.

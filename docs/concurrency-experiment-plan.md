@@ -1,5 +1,10 @@
 # Concurrency Experiment Plan
 
+> **Historical reference**
+>
+> This document preserves the original Point concurrency experiment plan.
+> Current Point results and local verification steps are documented in [Point Concurrency Strategy Comparison](point-concurrency-strategy-comparison.md) and [Runbook](runbook.md).
+
 ## Purpose
 
 This document defines how concurrency issues will be reproduced and solved in this project.
