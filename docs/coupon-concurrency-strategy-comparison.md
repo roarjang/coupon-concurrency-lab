@@ -167,7 +167,7 @@ What this strategy does not protect:
 - Lost updates on `Coupon.issuedQuantity`.
 - Inventory-record mismatch when many distinct users request a limited-stock coupon.
 
-The important portfolio point is that some invariants belong at the database boundary. User-coupon uniqueness is one of them. An application pre-check can improve error handling or avoid unnecessary work, but the database constraint is the final guard.
+The important design point is that some invariants belong at the database boundary. User-coupon uniqueness is one of them. An application pre-check can improve error handling or avoid unnecessary work, but the database constraint is the final guard.
 
 The experiment also exposed an operational detail: in a `ddl-auto=update` environment, adding a unique constraint to an existing table may not be applied automatically. The schema must be verified before relying on the result.
 

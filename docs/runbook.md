@@ -313,7 +313,9 @@ DEL coupon:issue:users:{couponId}
 ## 13. Related Documents
 
 - [README](../README.md)
+- [Architecture](architecture.md)
 - [Point Concurrency Strategy Comparison](point-concurrency-strategy-comparison.md)
 - [Coupon Concurrency Strategy Comparison](coupon-concurrency-strategy-comparison.md)
 - [Coupon Domain Design](coupon-domain-design.md)
+- [Redis Consistency Boundary](redis-consistency-boundary.md)
 - [Implementation Roadmap](history/implementation-roadmap.md)
