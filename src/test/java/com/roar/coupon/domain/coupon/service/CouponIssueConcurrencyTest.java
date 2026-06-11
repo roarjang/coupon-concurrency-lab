@@ -16,6 +16,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
@@ -35,7 +36,7 @@ class CouponIssueConcurrencyTest {
     private static final long BASELINE_DELAY_MILLIS = 100L;
     private static final long LOCK_HOLD_MILLIS = 5L;
     private static final long LATCH_TIMEOUT_SECONDS = 30L;
-    private static final String COUPON_ISSUE_COUNTER_KEY_PREFIX = "coupon:issue:count:";
+    private static final String COUPON_ISSUE_KEY_PREFIX = "coupon:issue:";
 
     private static final int OVERSELLING_INITIAL_STOCK = 100;
     private static final int OVERSELLING_REQUEST_COUNT = 1000;
@@ -54,6 +55,12 @@ class CouponIssueConcurrencyTest {
 
     private static final int REDIS_COUNTER_STOCK = 100;
     private static final int REDIS_COUNTER_REQUEST_COUNT = 1000;
+
+    private static final int REDIS_LUA_OVERSELLING_STOCK = 100;
+    private static final int REDIS_LUA_OVERSELLING_REQUEST_COUNT = 1000;
+
+    private static final int REDIS_LUA_DUPLICATE_STOCK = 1000;
+    private static final int REDIS_LUA_DUPLICATE_REQUEST_COUNT = 100;
 
     @Autowired
     private TestCouponIssueService testCouponIssueService;
@@ -408,6 +415,145 @@ class CouponIssueConcurrencyTest {
         assertThat(savedCouponAfterIssue.getIssuedQuantity()).isLessThanOrEqualTo(savedCouponAfterIssue.getTotalQuantity());
     }
 
+    @Test
+    @DisplayName("Redis Lua를 적용한 쿠폰 발급은 동시 요청에서 재고 초과 발급을 막는다")
+    void concurrentIssue_redisLua_preventsCouponStockOverselling()
+        throws InterruptedException {
+
+        // given
+        List<User> savedUsers = userRepository.saveAll(
+                createUsers(REDIS_LUA_OVERSELLING_REQUEST_COUNT)
+        );
+
+        Coupon coupon = couponRepository.save(
+                new Coupon(
+                        "Redis Lua 재고 초과 테스트 쿠폰",
+                        DISCOUNT_AMOUNT,
+                        REDIS_LUA_OVERSELLING_STOCK
+                )
+        );
+        Long couponId = coupon.getId();
+
+        String countKey = CouponRedisKeys.issueCounter(couponId);
+        String userSetKey = CouponRedisKeys.issueUsers(couponId);
+        stringRedisTemplate.delete(List.of(countKey, userSetKey));
+
+        List<Long> userIds = savedUsers.stream()
+                .map(User::getId)
+                .toList();
+
+        // when
+        ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
+                userIds,
+                couponId,
+                0L,
+                (userId, issuedCouponId, delayMillis) ->
+                    testCouponIssueService.issueWithRedisLua(
+                            userId,
+                            issuedCouponId,
+                            REDIS_LUA_OVERSELLING_STOCK,
+                            delayMillis
+                    )
+        );
+
+        Coupon savedCouponAfterIssue = couponRepository.findById(couponId)
+                .orElseThrow(() -> new IllegalArgumentException("쿠폰을 찾을 수 없습니다."));
+        long issuedCouponCountByCoupon = issuedCouponRepository.countByCouponId(couponId);
+        String redisCounterValue = stringRedisTemplate.opsForValue().get(countKey);
+        Long redisIssuedUserCount = stringRedisTemplate.opsForSet().size(userSetKey);
+
+        // then
+        System.out.println("[Test 8: Redis Lua Prevents Coupon Stock Overselling]");
+        System.out.println("successCount = " + concurrencyResult.successCount());
+        System.out.println("failCount = " + concurrencyResult.failCount());
+        System.out.println("issuedCouponCountByCoupon = " + issuedCouponCountByCoupon);
+        System.out.println("finalIssuedQuantity = " + savedCouponAfterIssue.getIssuedQuantity());
+
+        assertThat(concurrencyResult.totalCount()).isEqualTo(REDIS_LUA_OVERSELLING_REQUEST_COUNT);
+        assertThat(concurrencyResult.successCount()).isEqualTo(REDIS_LUA_OVERSELLING_STOCK);
+        assertThat(concurrencyResult.failCount()).isEqualTo(REDIS_LUA_OVERSELLING_REQUEST_COUNT - REDIS_LUA_OVERSELLING_STOCK);
+
+        assertThat(issuedCouponCountByCoupon).isEqualTo(REDIS_LUA_OVERSELLING_STOCK);
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isEqualTo(REDIS_LUA_OVERSELLING_STOCK);
+        assertThat((long) savedCouponAfterIssue.getIssuedQuantity()).isEqualTo(issuedCouponCountByCoupon);
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isLessThanOrEqualTo(savedCouponAfterIssue.getTotalQuantity());
+
+        assertThat(redisCounterValue).isEqualTo(String.valueOf(REDIS_LUA_OVERSELLING_STOCK));
+        assertThat(redisIssuedUserCount).isEqualTo(REDIS_LUA_OVERSELLING_STOCK);
+    }
+
+    @Test
+    @DisplayName("Redis Lua를 적용한 쿠폰 발급은 동일 사용자 중복 발급을 막는다")
+    void concurrentIssue_redisLua_preventsDuplicateIssue()
+        throws InterruptedException {
+
+        // given
+        User savedUser = userRepository.save(
+                User.create(
+                        "lua-duplicate@test.com",
+                        "encoded-password",
+                        "lua-duplicate-user"
+                )
+        );
+
+        List<Long> duplicateRequestUserIds = createRepeatedUserIds(
+                savedUser.getId(),
+                REDIS_LUA_DUPLICATE_REQUEST_COUNT
+        );
+
+        Coupon coupon = couponRepository.save(
+                new Coupon(
+                        "Redis Lua 중복 방지 테스트 쿠폰",
+                        DISCOUNT_AMOUNT,
+                        REDIS_LUA_DUPLICATE_STOCK
+                )
+        );
+        Long couponId = coupon.getId();
+
+        String countKey = CouponRedisKeys.issueCounter(couponId);
+        String userSetKey = CouponRedisKeys.issueUsers(couponId);
+        stringRedisTemplate.delete(List.of(countKey, userSetKey));
+
+        // when
+        ConcurrencyResult concurrencyResult = runConcurrentIssueRequests(
+                duplicateRequestUserIds,
+                couponId,
+                0L,
+                (userId, issuedCouponId, delayMillis) ->
+                    testCouponIssueService.issueWithRedisLua(
+                            userId,
+                            issuedCouponId,
+                            REDIS_LUA_DUPLICATE_STOCK,
+                            delayMillis
+                    )
+        );
+
+        Coupon savedCouponAfterIssue = couponRepository.findById(couponId)
+                .orElseThrow(() -> new IllegalArgumentException("쿠폰을 찾을 수 없습니다."));
+        long issuedCouponCountByCoupon = issuedCouponRepository.countByCouponId(couponId);
+        long issuedCouponCountByUserAndCoupon = issuedCouponRepository.countByUserIdAndCouponId(savedUser.getId(), couponId);
+        String redisCountValue = stringRedisTemplate.opsForValue().get(countKey);
+        Long redisIssuedUserCount = stringRedisTemplate.opsForSet().size(userSetKey);
+
+        // then
+        System.out.println("[Test 9: Redis Lua Prevents Coupon Duplicate Issue]");
+        System.out.println("successCount = " + concurrencyResult.successCount());
+        System.out.println("failCount = " + concurrencyResult.failCount());
+        System.out.println("issuedCouponCountByUserAndCoupon = " + issuedCouponCountByUserAndCoupon);
+        System.out.println("finalIssuedQuantity = " + savedCouponAfterIssue.getIssuedQuantity());
+
+        assertThat(concurrencyResult.totalCount()).isEqualTo(REDIS_LUA_DUPLICATE_REQUEST_COUNT);
+        assertThat(concurrencyResult.successCount()).isEqualTo(1);
+        assertThat(concurrencyResult.failCount()).isEqualTo(REDIS_LUA_DUPLICATE_REQUEST_COUNT - 1);
+
+        assertThat(issuedCouponCountByCoupon).isEqualTo(1L);
+        assertThat(issuedCouponCountByUserAndCoupon).isEqualTo(1L);
+        assertThat(savedCouponAfterIssue.getIssuedQuantity()).isEqualTo(1);
+
+        assertThat(redisCountValue).isEqualTo("1");
+        assertThat(redisIssuedUserCount).isEqualTo(1L);
+    }
+
     private ConcurrencyResult runConcurrentIssueRequests(
             List<Long> userIds,
             Long couponId,
@@ -524,6 +670,29 @@ class CouponIssueConcurrencyTest {
         private final CouponRepository couponRepository;
         private final IssuedCouponRepository issuedCouponRepository;
         private final StringRedisTemplate stringRedisTemplate;
+
+        private static final String REDIS_LUA_ISSUE_SCRIPT =
+                """
+                local countKey = KEYS[1]
+                local userSetKey = KEYS[2]
+                local userId = ARGV[1]
+                local totalStock = tonumber(ARGV[2])
+                
+                if redis.call('SISMEMBER', userSetKey, userId) == 1 then
+                    return -2
+                end
+                
+                local current = tonumber(redis.call('GET', countKey) or '0')
+                if current >= totalStock then
+                    return -1
+                end
+                
+                redis.call('INCR', countKey)
+                redis.call('SADD', userSetKey, userId)
+                return 1
+                """;
+        private static final RedisScript<Long> REDIS_LUA_ISSUE_REDIS_SCRIPT =
+                RedisScript.of(REDIS_LUA_ISSUE_SCRIPT, Long.class);
 
         TestCouponIssueService(
                 CouponRepository couponRepository,
@@ -676,6 +845,50 @@ class CouponIssueConcurrencyTest {
             }
         }
 
+        @Transactional
+        public void issueWithRedisLua(
+                Long userId,
+                Long couponId,
+                long totalStock,
+                long delayMillis
+        ) {
+            String countKey = CouponRedisKeys.issueCounter(couponId);
+            String userSetKey = CouponRedisKeys.issueUsers(couponId);
+
+            Long result = stringRedisTemplate.execute(
+                    REDIS_LUA_ISSUE_REDIS_SCRIPT,
+                    List.of(countKey, userSetKey),
+                    userId.toString(),
+                    String.valueOf(totalStock)
+            );
+
+            long luaResult = java.util.Objects.requireNonNull(result, "Redis Lua 실행 실패");
+
+            if (luaResult == -2L) {
+                throw new IllegalArgumentException("이미 발급받은 쿠폰입니다.");
+            } else if (luaResult == -1L) {
+                throw new IllegalArgumentException("쿠폰이 모두 소진됐습니다.");
+            } else if (luaResult != 1L) {
+                throw new IllegalStateException("Unexpected Redis Lua result: " + luaResult);
+            }
+
+            if (delayMillis > 0) {
+                sleep(delayMillis);
+            }
+
+            try {
+                int updatedRows = couponRepository.increaseIssuedQuantityIfStockAvailable(couponId);
+                if (updatedRows == 0) {
+                    throw new IllegalArgumentException("쿠폰이 모두 소진됐습니다.");
+                }
+
+                issuedCouponRepository.saveAndFlush(IssuedCoupon.issue(userId, couponId));
+            } catch (RuntimeException e) {
+                compensateRedisReservation(countKey, userSetKey, userId);
+                throw e;
+            }
+        }
+
         private void sleep(long millis) {
             try {
                 Thread.sleep(millis);
@@ -688,11 +901,19 @@ class CouponIssueConcurrencyTest {
         private void compensateRedisCounter(String key) {
             stringRedisTemplate.opsForValue().decrement(key);
         }
+
+        private void compensateRedisReservation(String countKey, String userSetKey, Long userId) {
+            stringRedisTemplate.opsForValue().decrement(countKey);
+            stringRedisTemplate.opsForSet().remove(userSetKey, userId.toString());
+        }
     }
 
     private static final class CouponRedisKeys {
         static String issueCounter(Long couponId) {
-            return COUPON_ISSUE_COUNTER_KEY_PREFIX + couponId;
+            return COUPON_ISSUE_KEY_PREFIX + "count:" + couponId;
+        }
+        static String issueUsers(Long couponId) {
+            return COUPON_ISSUE_KEY_PREFIX + "users:" + couponId;
         }
 
         private CouponRedisKeys() {}
