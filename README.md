@@ -1,10 +1,10 @@
-# Flash Coupon Payment
+# Coupon Concurrency Lab
 
-선착순 쿠폰 발급 및 포인트 결제 정합성 실험 프로젝트
+선착순 쿠폰 발급과 포인트 차감의 동시성·정합성 전략 비교 프로젝트
 
 ## 프로젝트 요약
 
-선착순 쿠폰 발급과 포인트 결제 시나리오에서 발생하는 동시성 문제를 재현하고, 다양한 정합성 보장 전략의 동작 방식과 trade-off를 비교한 백엔드 실험 프로젝트입니다.
+선착순 쿠폰 발급과 포인트 차감 과정에서 발생하는 동시성 문제를 재현하고, 다양한 정합성 보장 전략의 동작 방식과 trade-off를 비교한 백엔드 실험 프로젝트입니다.
 
 이 프로젝트의 핵심은 CRUD 기능 구현이 아니라, `@Transactional`만으로는 해결되지 않는 race condition을 실험으로 확인하고 DB Lock, Optimistic Lock, Atomic Update, Redis Counter, Redis Lua Script의 정합성 보장 범위와 trade-off를 비교하는 것입니다.
 
@@ -13,7 +13,7 @@
 실제 서비스에서는 짧은 시간에 많은 요청이 같은 데이터에 접근합니다.
 단순한 read-modify-write 구현은 이 상황에서 다음 문제를 만들 수 있습니다.
 
-- 여러 결제 요청이 같은 포인트 잔액을 동시에 읽고 차감하는 lost update
+- 여러 포인트 차감 요청이 같은 잔액을 동시에 변경하면서 발생하는 lost update
 - 쿠폰 재고보다 많은 발급 내역이 생성되는 overselling
 - 같은 사용자가 같은 쿠폰을 중복 발급받는 duplicate issuance
 - Redis에서 요청을 먼저 통과시킨 뒤 PostgreSQL 저장이 실패하는 cross-store consistency 문제
